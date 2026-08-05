@@ -1,6 +1,6 @@
 # Hyperbolic TSF Model
 
-The first three conceptual layers are organized as follows:
+The model is organized as follows:
 
 ```text
 RevIN
@@ -83,8 +83,6 @@ temporal_tangent: [B, L, H]
 interaction:      [B, C, L]
 ```
 
-The fourth layer is intentionally not implemented.
-
 ## Forecasting Head
 
 The end-to-end model is:
@@ -115,3 +113,41 @@ The forecasting head contains two paths:
 The two paths are added before inverse RevIN. `target_indices` supports `S`,
 `M`, and `MS` forecasting modes without requiring the prediction head to emit
 unused variables.
+
+## Structural Stabilization
+
+The current implementation adds three constraints motivated by the ETTh1
+training behavior:
+
+1. The variable-branch HNN projection can use a low-rank factorization. This
+   avoids a fully free mapping from every historical position to every
+   variable node, reducing memorization of the fixed input window.
+2. HGCN uses a learnable residual coefficient. The second graph aggregation
+   therefore cannot arbitrarily erase the original node representation.
+3. The direct head uses shared low-rank temporal bases and a local
+   level/slope residual. This gives long horizons a shared temporal structure
+   instead of a separate unconstrained parameter for every history/future
+   position pair.
+
+The model exposes diagnostics through `forward(return_aux=True)`:
+
+```text
+spatial_graph_entropy       normalized variable-graph entropy
+temporal_graph_entropy      normalized time-graph entropy
+variable_weight_entropy     normalized variable-to-time attention entropy
+spatial_graph_mix           dynamic/prior graph mixing coefficient
+temporal_graph_mix          dynamic/prior graph mixing coefficient
+spatial_prior_dynamic_gap   distance between prior and dynamic graphs
+temporal_prior_dynamic_gap  distance between prior and dynamic graphs
+spatial_tangent_norm        mean spatial tangent norm
+temporal_tangent_norm       mean temporal tangent norm
+fusion_gate_mean            mean variable-context gate
+fusion_gate_std             gate diversity
+```
+
+These quantities are intended for logging during training. Very low graph
+entropy indicates near one-hot or collapsed neighborhoods; entropy close to
+one indicates a nearly uniform graph. Rapidly increasing tangent norms may
+indicate manifold instability. A fusion gate near zero means the variable
+graph is being ignored, while a gate with almost zero standard deviation
+indicates that all time points receive nearly identical variable context.

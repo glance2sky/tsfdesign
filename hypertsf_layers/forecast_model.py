@@ -14,8 +14,121 @@ from .front_layers import (
 )
 
 
+class LowRankTemporalProjection(nn.Module):
+    """Factorized projection from history positions to future positions."""
+
+    def __init__(
+        self,
+        input_length: int,
+        output_length: int,
+        feature_dim: int,
+        rank: int,
+    ) -> None:
+        super().__init__()
+        if rank <= 0:
+            raise ValueError("rank must be positive")
+        rank = min(rank, input_length, output_length)
+        self.input_length = input_length
+        self.output_length = output_length
+        self.feature_dim = feature_dim
+        self.rank = rank
+        self.input_basis = nn.Parameter(torch.empty(rank, input_length))
+        self.output_basis = nn.Parameter(torch.empty(output_length, rank))
+        self.output_anchor = nn.Parameter(torch.zeros(output_length, 1))
+        nn.init.normal_(
+            self.input_basis,
+            mean=0.0,
+            std=input_length**-0.5,
+        )
+        nn.init.normal_(
+            self.output_basis,
+            mean=0.0,
+            std=rank**-0.5,
+        )
+        nn.init.constant_(self.output_anchor, 0.0)
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        if values.ndim != 3:
+            raise ValueError("values must have shape [batch, time, features]")
+        if values.size(1) != self.input_length:
+            raise ValueError(
+                f"Expected input length {self.input_length}, got {values.size(1)}"
+            )
+        basis = self.input_basis / self.input_basis.norm(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-6)
+        coefficients = torch.einsum("rl,blh->brh", basis, values)
+        projected = torch.einsum(
+            "pr,brh->bph", self.output_basis, coefficients
+        )
+        anchor = self.output_anchor.view(1, self.output_length, 1)
+        return projected + anchor * values.mean(dim=1, keepdim=True)
+
+
+class LocalTrendResidual(nn.Module):
+    """Low-variance local level and slope extrapolation."""
+
+    def __init__(
+        self,
+        input_length: int,
+        pred_length: int,
+        output_dim: int,
+        trend_window: int | None = None,
+    ) -> None:
+        super().__init__()
+        if trend_window is None:
+            trend_window = min(input_length, 24)
+        if trend_window < 2 or trend_window > input_length:
+            raise ValueError(
+                "trend_window must be in [2, input_length]"
+            )
+        self.input_length = input_length
+        self.pred_length = pred_length
+        self.output_dim = output_dim
+        self.trend_window = trend_window
+        self.level_weight = nn.Parameter(torch.ones(1, 1, output_dim))
+        self.slope_weight = nn.Parameter(torch.full((1, 1, output_dim), 0.1))
+        positions = torch.arange(
+            1, pred_length + 1, dtype=torch.float32
+        ).view(1, pred_length, 1)
+        self.register_buffer(
+            "future_positions",
+            positions / float(trend_window - 1),
+        )
+
+    def forward(
+        self,
+        normalized_input: torch.Tensor,
+        target_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        if normalized_input.ndim != 3:
+            raise ValueError(
+                "normalized_input must have shape [batch, time, variables]"
+            )
+        if normalized_input.size(1) != self.input_length:
+            raise ValueError(
+                f"Expected input length {self.input_length}, "
+                f"got {normalized_input.size(1)}"
+            )
+        recent = normalized_input[:, -self.trend_window :]
+        level = recent[:, -1:, :]
+        slope = (recent[:, -1:, :] - recent[:, :1, :]) / float(
+            self.trend_window - 1
+        )
+        trend = (
+            self.level_weight * level
+            + self.slope_weight * slope * self.future_positions
+        )
+        return trend.index_select(-1, target_indices)
+
+
 class DirectForecastHead(nn.Module):
-    """Direct multi-horizon head with a trend-preserving linear residual."""
+    """Structured direct multi-horizon head.
+
+    The historical-to-future map is factorized into shared temporal bases.
+    This regularizes long-horizon extrapolation while retaining a local trend
+    residual for variables whose recent level and slope remain predictive.
+    """
 
     def __init__(
         self,
@@ -26,6 +139,8 @@ class DirectForecastHead(nn.Module):
         output_dim: int,
         dropout: float = 0.0,
         use_linear_residual: bool = True,
+        temporal_rank: int = 16,
+        trend_window: int | None = None,
     ) -> None:
         super().__init__()
         self.input_length = input_length
@@ -33,16 +148,34 @@ class DirectForecastHead(nn.Module):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.use_linear_residual = use_linear_residual
+        self.temporal_rank = min(temporal_rank, input_length, pred_length)
 
-        self.horizon_projection = nn.Linear(input_length, pred_length)
+        self.horizon_projection = LowRankTemporalProjection(
+            input_length=input_length,
+            output_length=pred_length,
+            feature_dim=hidden_dim,
+            rank=self.temporal_rank,
+        )
         self.context_norm = nn.LayerNorm(hidden_dim)
         self.context_dropout = nn.Dropout(dropout)
         self.output_projection = nn.Linear(hidden_dim, output_dim)
 
         if use_linear_residual:
-            self.linear_residual = nn.Linear(input_length, pred_length)
+            self.linear_residual = LowRankTemporalProjection(
+                input_length=input_length,
+                output_length=pred_length,
+                feature_dim=input_dim,
+                rank=min(self.temporal_rank, input_length, pred_length),
+            )
+            self.trend_residual = LocalTrendResidual(
+                input_length=input_length,
+                pred_length=pred_length,
+                output_dim=output_dim,
+                trend_window=trend_window,
+            )
         else:
             self.register_module("linear_residual", None)
+            self.register_module("trend_residual", None)
 
     def forward(
         self,
@@ -69,17 +202,18 @@ class DirectForecastHead(nn.Module):
                 f"got {normalized_input.size(1)}"
             )
 
-        hidden = self.horizon_projection(temporal_context.transpose(1, 2))
-        hidden = hidden.transpose(1, 2)
+        hidden = self.horizon_projection(temporal_context)
         hidden = self.context_dropout(self.context_norm(hidden))
         direct = self.output_projection(hidden)
 
         if self.linear_residual is None:
             residual = torch.zeros_like(direct)
         else:
-            residual_all = self.linear_residual(normalized_input.transpose(1, 2))
-            residual_all = residual_all.transpose(1, 2)
+            residual_all = self.linear_residual(normalized_input)
             residual = residual_all.index_select(-1, target_indices)
+            residual = residual + self.trend_residual(
+                normalized_input, target_indices
+            )
 
         return {
             "direct": direct,
@@ -113,6 +247,10 @@ class HyperbolicTSF(nn.Module):
         revin_affine: bool = True,
         revin_subtract_last: bool = False,
         use_linear_residual: bool = True,
+        spatial_rank: int | None = 32,
+        temporal_rank: int = 16,
+        trend_window: int | None = None,
+        hgcn_residual_init: float = 0.5,
     ) -> None:
         super().__init__()
         if input_length <= 0 or pred_length <= 0:
@@ -153,6 +291,7 @@ class HyperbolicTSF(nn.Module):
         self.embedding = ManifoldEmbedding(
             num_variables=num_variables,
             tangent_dim=tangent_dim,
+            input_length=input_length,
             manifold=manifold,
             trainable_curvature=trainable_curvature,
             init_curvature=init_curvature,
@@ -167,6 +306,8 @@ class HyperbolicTSF(nn.Module):
             trainable_curvature=trainable_curvature,
             init_curvature=init_curvature,
             dropout=dropout,
+            spatial_rank=spatial_rank,
+            hgcn_residual_init=hgcn_residual_init,
         )
         self.forecast_head = DirectForecastHead(
             input_length=input_length,
@@ -176,6 +317,8 @@ class HyperbolicTSF(nn.Module):
             output_dim=output_dim,
             dropout=dropout,
             use_linear_residual=use_linear_residual,
+            temporal_rank=temporal_rank,
+            trend_window=trend_window,
         )
 
     def forward(

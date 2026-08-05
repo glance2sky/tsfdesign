@@ -50,3 +50,36 @@ def test_hyperbolic_tsf_returns_auxiliary_graph_outputs() -> None:
     assert output["encoder"]["variable_weights"].shape == (2, 10, 3)
     assert output["encoder"]["variable_context"].shape == (2, 10, 6)
     assert output["head"]["direct"].shape == (2, 4, 3)
+    for key in (
+        "spatial_graph_entropy",
+        "temporal_graph_entropy",
+        "variable_weight_entropy",
+        "fusion_gate_mean",
+        "fusion_gate_std",
+        "spatial_graph_mix",
+        "temporal_graph_mix",
+        "spatial_tangent_norm",
+        "temporal_tangent_norm",
+    ):
+        assert torch.isfinite(output["encoder"][key])
+    assert 0.0 <= output["encoder"]["spatial_graph_entropy"] <= 1.0
+    assert 0.0 <= output["encoder"]["temporal_graph_entropy"] <= 1.0
+    assert 0.0 <= output["encoder"]["variable_weight_entropy"] <= 1.0
+    assert 0.0 <= output["encoder"]["fusion_gate_mean"] <= 1.0
+
+
+def test_structured_head_scales_to_long_horizon() -> None:
+    model = HyperbolicTSF(
+        input_length=96,
+        pred_length=720,
+        num_variables=7,
+        tangent_dim=8,
+        hidden_dim=16,
+        manifold="poincare",
+        temporal_rank=16,
+        spatial_rank=8,
+    )
+    output = model(torch.randn(2, 96, 7))
+    assert output.shape == (2, 720, 7)
+    assert torch.isfinite(output).all()
+    assert model.forecast_head.horizon_projection.rank == 16

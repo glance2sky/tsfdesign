@@ -104,12 +104,16 @@ class ManifoldEmbedding(nn.Module):
         trainable_curvature: bool = True,
         init_curvature: float = 1.0,
         dropout: float = 0.0,
+        input_length: int | None = None,
     ) -> None:
         super().__init__()
         if num_variables <= 0 or tangent_dim <= 0:
             raise ValueError("num_variables and tangent_dim must be positive")
+        if input_length is not None and input_length <= 0:
+            raise ValueError("input_length must be positive when provided")
         self.num_variables = num_variables
         self.tangent_dim = tangent_dim
+        self.input_length = input_length
         self.space = ManifoldSpace(
             manifold,
             trainable_curvature=trainable_curvature,
@@ -119,9 +123,17 @@ class ManifoldEmbedding(nn.Module):
         self.variable_identity = nn.Parameter(
             torch.empty(1, 1, num_variables, tangent_dim)
         )
+        if input_length is None:
+            self.register_parameter("time_identity", None)
+        else:
+            self.time_identity = nn.Parameter(
+                torch.empty(1, input_length, 1, tangent_dim)
+            )
         self.norm = nn.LayerNorm(tangent_dim)
         self.dropout = nn.Dropout(dropout)
         nn.init.normal_(self.variable_identity, mean=0.0, std=0.02)
+        if self.time_identity is not None:
+            nn.init.normal_(self.time_identity, mean=0.0, std=0.02)
 
     @property
     def manifold_dim(self) -> int:
@@ -130,7 +142,14 @@ class ManifoldEmbedding(nn.Module):
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         _check_series(x, self.num_variables)
         tangent = self.value_projection(x.unsqueeze(-1))
-        tangent = self.norm(tangent + self.variable_identity)
+        tangent = tangent + self.variable_identity
+        if self.time_identity is not None:
+            if x.size(1) != self.input_length:
+                raise ValueError(
+                    f"Expected input length {self.input_length}, got {x.size(1)}"
+                )
+            tangent = tangent + self.time_identity
+        tangent = self.norm(tangent)
         tangent = self.dropout(tangent)
         return {
             "tangent": tangent,
@@ -148,17 +167,36 @@ class _HyperbolicNeuralProjection(nn.Module):
         in_features: int,
         out_features: int,
         dropout: float,
+        rank: int | None = None,
     ) -> None:
         super().__init__()
         self.space = space
-        self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        if rank is None:
+            self.weight = nn.Parameter(torch.empty(out_features, in_features))
+            self.register_parameter("left_weight", None)
+            self.register_parameter("right_weight", None)
+        else:
+            if rank <= 0:
+                raise ValueError("rank must be positive")
+            rank = min(rank, in_features, out_features)
+            self.register_parameter("weight", None)
+            self.left_weight = nn.Parameter(torch.empty(out_features, rank))
+            self.right_weight = nn.Parameter(torch.empty(rank, in_features))
         self.bias = nn.Parameter(torch.zeros(out_features))
         self.dropout = nn.Dropout(dropout)
-        nn.init.xavier_uniform_(self.weight)
+        if rank is None:
+            nn.init.xavier_uniform_(self.weight)
+        else:
+            nn.init.xavier_uniform_(self.left_weight)
+            nn.init.xavier_uniform_(self.right_weight)
 
     def forward(self, tangent: torch.Tensor) -> torch.Tensor:
         point = self.space.expmap0(tangent)
-        point = self.space.mobius_matvec(self.weight, point)
+        if self.weight is None:
+            weight = self.left_weight @ self.right_weight
+        else:
+            weight = self.weight
+        point = self.space.mobius_matvec(weight, point)
         point = self.space.manifold_bias(point, self.bias)
         activation = torch.tanh(self.space.logmap0(point))
         activation = self.dropout(activation)
@@ -173,12 +211,17 @@ class _HyperbolicGraphConvolution(nn.Module):
         space: ManifoldSpace,
         hidden_dim: int,
         dropout: float,
+        residual_init: float = 0.5,
     ) -> None:
         super().__init__()
         self.space = space
         self.weight = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
         self.bias = nn.Parameter(torch.zeros(hidden_dim))
         self.dropout = nn.Dropout(dropout)
+        if not 0.0 <= residual_init <= 1.0:
+            raise ValueError("residual_init must be in [0, 1]")
+        residual_logit = torch.logit(torch.tensor(residual_init).clamp(1e-4, 1 - 1e-4))
+        self.residual_logit = nn.Parameter(residual_logit)
         nn.init.xavier_uniform_(self.weight)
 
     def forward(
@@ -186,11 +229,17 @@ class _HyperbolicGraphConvolution(nn.Module):
         points: torch.Tensor,
         adjacency: torch.Tensor,
     ) -> torch.Tensor:
+        input_tangent = self.space.logmap0(points)
         points = self.space.mobius_matvec(self.weight, points)
         tangent = self.space.logmap0(points)
         tangent = torch.bmm(adjacency, tangent)
         tangent = self.dropout(tangent)
         tangent = torch.tanh(tangent)
+        residual_weight = torch.sigmoid(self.residual_logit)
+        tangent = (
+            (1.0 - residual_weight) * tangent
+            + residual_weight * input_tangent
+        )
         points = self.space.expmap0(tangent)
         return self.space.manifold_bias(points, self.bias)
 
@@ -215,6 +264,8 @@ class DualGraphHyperbolicLayer(nn.Module):
         trainable_curvature: bool = True,
         init_curvature: float = 1.0,
         dropout: float = 0.0,
+        spatial_rank: int | None = None,
+        hgcn_residual_init: float = 0.5,
     ) -> None:
         super().__init__()
         if input_length <= 0 or num_variables <= 0:
@@ -226,6 +277,7 @@ class DualGraphHyperbolicLayer(nn.Module):
         self.num_variables = num_variables
         self.tangent_dim = tangent_dim
         self.hidden_dim = hidden_dim
+        self.spatial_rank = spatial_rank
         self.spatial_space = ManifoldSpace(
             manifold,
             trainable_curvature=trainable_curvature,
@@ -240,16 +292,26 @@ class DualGraphHyperbolicLayer(nn.Module):
         spatial_input_dim = input_length * tangent_dim
         temporal_input_dim = num_variables * tangent_dim
         self.spatial_hnn = _HyperbolicNeuralProjection(
-            self.spatial_space, spatial_input_dim, hidden_dim, dropout
+            self.spatial_space,
+            spatial_input_dim,
+            hidden_dim,
+            dropout,
+            rank=spatial_rank,
         )
         self.temporal_hnn = _HyperbolicNeuralProjection(
             self.temporal_space, temporal_input_dim, hidden_dim, dropout
         )
         self.spatial_hgcn = _HyperbolicGraphConvolution(
-            self.spatial_space, hidden_dim, dropout
+            self.spatial_space,
+            hidden_dim,
+            dropout,
+            residual_init=hgcn_residual_init,
         )
         self.temporal_hgcn = _HyperbolicGraphConvolution(
-            self.temporal_space, hidden_dim, dropout
+            self.temporal_space,
+            hidden_dim,
+            dropout,
+            residual_init=hgcn_residual_init,
         )
 
         self.spatial_graph_logits = nn.Parameter(
@@ -363,6 +425,25 @@ class DualGraphHyperbolicLayer(nn.Module):
             "temporal_prior": temporal_prior,
             "spatial_dynamic": spatial_dynamic,
             "temporal_dynamic": temporal_dynamic,
+            "spatial_graph_mix": spatial_mix,
+            "temporal_graph_mix": temporal_mix,
+            "spatial_graph_entropy": self._normalized_graph_entropy(spatial_graph),
+            "temporal_graph_entropy": self._normalized_graph_entropy(
+                temporal_graph
+            ),
+            "spatial_prior_dynamic_gap": (
+                spatial_prior - spatial_dynamic
+            ).abs().mean(),
+            "temporal_prior_dynamic_gap": (
+                temporal_prior - temporal_dynamic
+            ).abs().mean(),
+            "spatial_tangent_norm": spatial_tangent.norm(dim=-1).mean(),
+            "temporal_tangent_norm": temporal_tangent.norm(dim=-1).mean(),
+            "variable_weight_entropy": self._normalized_graph_entropy(
+                variable_weights
+            ),
+            "fusion_gate_mean": fusion_gate.mean(),
+            "fusion_gate_std": fusion_gate.std(unbiased=False),
             "spatial_distance": spatial_distance,
             "temporal_distance": temporal_distance,
             "spatial_curvature": self.spatial_space.curvature,
@@ -407,6 +488,20 @@ class DualGraphHyperbolicLayer(nn.Module):
     ) -> torch.Tensor:
         graph = (1.0 - mix) * prior + mix * dynamic
         return graph / graph.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
+    @staticmethod
+    def _normalized_graph_entropy(graph: torch.Tensor) -> torch.Tensor:
+        entropy = -(
+            graph.clamp_min(1e-8) * graph.clamp_min(1e-8).log()
+        ).sum(dim=-1)
+        maximum = torch.log(
+            torch.tensor(
+                graph.size(-1),
+                device=graph.device,
+                dtype=graph.dtype,
+            )
+        ).clamp_min(1e-8)
+        return (entropy / maximum).mean()
 
 def _check_series(x: torch.Tensor, num_variables: int) -> None:
     if x.ndim != 3:
