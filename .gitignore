@@ -8,3 +8,5 @@ env/
 .env
 *.log
 
+# Reference repository with no checked-out working tree.
+reference/other/THINK/
