@@ -83,3 +83,25 @@ def test_structured_head_scales_to_long_horizon() -> None:
     assert output.shape == (2, 720, 7)
     assert torch.isfinite(output).all()
     assert model.forecast_head.horizon_projection.rank == 16
+
+
+def test_default_configuration_preserves_v1_capacity_and_disables_new_paths() -> None:
+    model = HyperbolicTSF(
+        input_length=96,
+        pred_length=720,
+        num_variables=7,
+        tangent_dim=32,
+        hidden_dim=64,
+        manifold="poincare",
+        use_linear_residual=True,
+    )
+    assert model.embedding.time_identity is None
+    assert model.graph_encoder.spatial_hnn.weight is not None
+    assert model.graph_encoder.spatial_hgcn.residual_logit is None
+    assert model.forecast_head.horizon_projection.rank is None
+    assert model.forecast_head.linear_residual.rank is None
+    assert model.forecast_head.trend_residual.trend_scale_raw.item() == 0.0
+
+    output = model(torch.randn(2, 96, 7), return_aux=True)
+    assert output["head"]["trend_scale"].item() == 0.0
+    assert torch.isfinite(output["head"]["residual_to_direct_ratio"])

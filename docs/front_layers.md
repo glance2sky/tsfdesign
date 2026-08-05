@@ -151,3 +151,21 @@ one indicates a nearly uniform graph. Rapidly increasing tangent norms may
 indicate manifold instability. A fusion gate near zero means the variable
 graph is being ignored, while a gate with almost zero standard deviation
 indicates that all time points receive nearly identical variable context.
+
+## Capacity-Preserving Defaults
+
+The public `HyperbolicTSF` defaults preserve the original baseline capacity:
+
+```text
+spatial_rank=None
+temporal_rank=None
+hgcn_residual_init=None
+use_time_identity=False
+```
+
+The optional local trend branch is zero-initialized and bounded by a
+`tanh`-parameterized scale. It therefore cannot dominate the graph-aware
+forecast at initialization. The head exposes `trend_scale`,
+`direct_abs_mean`, `residual_abs_mean`, and
+`residual_to_direct_ratio` through `return_aux=True`, making it possible to
+detect whether the residual path is becoming a shortcut.

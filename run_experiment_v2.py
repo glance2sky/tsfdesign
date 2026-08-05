@@ -101,6 +101,7 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
         preds.append(out["prediction"].cpu())
         trues.append(y.cpu())
         enc = out["encoder"]
+        head = out["head"]
         scalar_keys = [
             "spatial_graph_entropy", "temporal_graph_entropy",
             "variable_weight_entropy", "fusion_gate_mean", "fusion_gate_std",
@@ -112,6 +113,14 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
         for k in scalar_keys:
             if k in enc:
                 diag_accum.setdefault(k, []).append(float(enc[k].item()))
+        for k in (
+            "trend_scale",
+            "direct_abs_mean",
+            "residual_abs_mean",
+            "residual_to_direct_ratio",
+        ):
+            if k in head:
+                diag_accum.setdefault(k, []).append(float(head[k].item()))
 
     preds = torch.cat(preds, dim=0)
     trues = torch.cat(trues, dim=0)
@@ -251,6 +260,8 @@ def train_one(
     print(f"    tangent_norm(s/t)  = {test_result.get('spatial_tangent_norm', 0):.4f} / {test_result.get('temporal_tangent_norm', 0):.4f}")
     print(f"    prior_dyn_gap(s/t) = {test_result.get('spatial_prior_dynamic_gap', 0):.4f} / {test_result.get('temporal_prior_dynamic_gap', 0):.4f}")
     print(f"    curvature(s/t)     = {test_result.get('spatial_curvature', 0):.4f} / {test_result.get('temporal_curvature', 0):.4f}")
+    print(f"    trend_scale        = {test_result.get('trend_scale', 0):.4f}")
+    print(f"    residual/direct    = {test_result.get('residual_to_direct_ratio', 0):.4f}")
 
     return {
         "pred_len": pred_len,

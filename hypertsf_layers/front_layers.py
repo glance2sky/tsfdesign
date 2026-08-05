@@ -211,17 +211,22 @@ class _HyperbolicGraphConvolution(nn.Module):
         space: ManifoldSpace,
         hidden_dim: int,
         dropout: float,
-        residual_init: float = 0.5,
+        residual_init: float | None = None,
     ) -> None:
         super().__init__()
         self.space = space
         self.weight = nn.Parameter(torch.empty(hidden_dim, hidden_dim))
         self.bias = nn.Parameter(torch.zeros(hidden_dim))
         self.dropout = nn.Dropout(dropout)
-        if not 0.0 <= residual_init <= 1.0:
-            raise ValueError("residual_init must be in [0, 1]")
-        residual_logit = torch.logit(torch.tensor(residual_init).clamp(1e-4, 1 - 1e-4))
-        self.residual_logit = nn.Parameter(residual_logit)
+        if residual_init is None:
+            self.register_parameter("residual_logit", None)
+        else:
+            if not 0.0 <= residual_init <= 1.0:
+                raise ValueError("residual_init must be in [0, 1]")
+            residual_logit = torch.logit(
+                torch.tensor(residual_init).clamp(1e-4, 1 - 1e-4)
+            )
+            self.residual_logit = nn.Parameter(residual_logit)
         nn.init.xavier_uniform_(self.weight)
 
     def forward(
@@ -235,11 +240,12 @@ class _HyperbolicGraphConvolution(nn.Module):
         tangent = torch.bmm(adjacency, tangent)
         tangent = self.dropout(tangent)
         tangent = torch.tanh(tangent)
-        residual_weight = torch.sigmoid(self.residual_logit)
-        tangent = (
-            (1.0 - residual_weight) * tangent
-            + residual_weight * input_tangent
-        )
+        if self.residual_logit is not None:
+            residual_weight = torch.sigmoid(self.residual_logit)
+            tangent = (
+                (1.0 - residual_weight) * tangent
+                + residual_weight * input_tangent
+            )
         points = self.space.expmap0(tangent)
         return self.space.manifold_bias(points, self.bias)
 
@@ -265,7 +271,7 @@ class DualGraphHyperbolicLayer(nn.Module):
         init_curvature: float = 1.0,
         dropout: float = 0.0,
         spatial_rank: int | None = None,
-        hgcn_residual_init: float = 0.5,
+        hgcn_residual_init: float | None = None,
     ) -> None:
         super().__init__()
         if input_length <= 0 or num_variables <= 0:
