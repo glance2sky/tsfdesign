@@ -1,0 +1,828 @@
+                                        HGWaveNet: A Hyperbolic Graph Neural Network for Temporal
+                                                            Link Prediction
+                                                                  Qijie Bai                                                   Changli Nie                                 Haiwei Zhang∗
+                                               College of CS, TJ Key Lab of NDST                              College of CS, TJ Key Lab of NDST                 College of CS, TJ Key Lab of NDST
+                                                       Nankai University                                              Nankai University                                 Nankai University
+                                                         Tianjin, China                                                 Tianjin, China                                    Tianjin, China
+                                                 qijie.bai@mail.nankai.edu.cn                                     nie_cl@mail.nankai.edu.cn                          zhhaiwei@nankai.edu.cn
+
+                                                                                          Dongming Zhao                                            Xiaojie Yuan
+arXiv:2304.07302v2 [cs.LG] 3 May 2023
+
+
+
+
+                                                                            China Mobile Communication Group                            College of CS, TJ Key Lab of NDST
+                                                                                     Tianjin Co., Ltd                                           Nankai University
+                                                                                     Tianjin, China                                               Tianjin, China
+                                                                                waitman_840602@163.com                                        yuanxj@nankai.edu.cn
+
+                                        ABSTRACT                                                                                        KEYWORDS
+                                        Temporal link prediction, aiming to predict future edges between                                Temporal link prediction, hyperbolic geometry, graph neural net-
+                                        paired nodes in a dynamic graph, is of vital importance in diverse                              work, diffusion graph convolution, dilated causal convolution
+                                        applications. However, existing methods are mainly built upon uni-                              ACM Reference Format:
+                                        form Euclidean space, which has been found to be conflict with                                  Qijie Bai, Changli Nie, Haiwei Zhang, Dongming Zhao, and Xiaojie Yuan.
+                                        the power-law distributions of real-world graphs and unable to                                  2023. HGWaveNet: A Hyperbolic Graph Neural Network for Temporal Link
+                                        represent the hierarchical connections between nodes effectively.                               Prediction. In Proceedings of the ACM Web Conference 2023 (WWW ’23),
+                                        With respect to the special data characteristic, hyperbolic geometry                            April 30-May 4, 2023, Austin, TX, USA. ACM, New York, NY, USA, 10 pages.
+                                        offers an ideal alternative due to its exponential expansion property.                          https://doi.org/10.1145/3543507.3583455
+                                        In this paper, we propose HGWaveNet, a novel hyperbolic graph
+                                        neural network that fully exploits the fitness between hyperbolic                               1    INTRODUCTION
+                                        spaces and data distributions for temporal link prediction. Specifi-                            Dynamic graphs, derived from the general graphs by adding an addi-
+                                        cally, we design two key modules to learn the spatial topological                               tional temporal dimension, have attracted a lot of attention in recent
+                                        structures and temporal evolutionary information separately. On                                 years [14]. It has become a general practice to abstract real-world
+                                        the one hand, a hyperbolic diffusion graph convolution (HDGC)                                   complex systems (e.g. traffic systems [58], social networks [50] and
+                                        module effectively aggregates information from a wider range of                                 e-commerce platforms [16]) to this newly data structure due to its
+                                        neighbors. On the other hand, the internal order of causal corre-                               powerful ability for modeling the temporal interactions between
+                                        lation between historical states is captured by hyperbolic dilated                              entities. Temporal link prediction, aiming to forecast future rela-
+                                        causal convolution (HDCC) modules. The whole model is built                                     tionships between nodes, is of vital importance for understanding
+                                        upon the hyperbolic spaces to preserve the hierarchical structural                              the evolution of dynamic graphs [49].
+                                        information in the entire data flow. To prove the superiority of HG-                               According to the expression of temporal information, dynamic
+                                        WaveNet, extensive experiments are conducted on six real-world                                  graphs can be divided into two categories: continuous dynamic
+                                        graph datasets and the results show a relative improvement by up                                graphs and discrete dynamic graphs [54]. Continuous dynamic
+                                        to 6.67% on AUC for temporal link prediction over SOTA methods.                                 graphs, also called graph streams, can be viewed as groups of edges
+                                                                                                                                        ordered by time and each edge is associated with a timestamp.
+                                        CCS CONCEPTS                                                                                    Recording topological structures of a dynamic graph at constant
+                                        • Theory of computation → Dynamic graph algorithms; •                                           time intervals as snapshots, the list of snapshots is defined as a dis-
+                                        Computing methodologies → Dimensionality reduction and                                          crete dynamic graph. In comparison, continuous dynamic graphs
+                                        manifold learning; Neural networks.                                                             keep all temporal information [17], but discrete dynamic graphs are
+                                                                                                                                        more computationally efficient benefiting from the coarse-grained
+                                        ∗ Corresponding author.
+                                                                                                                                        updating frequency [24]. This paper studies temporal link predic-
+                                                                                                                                        tion on discrete dynamic graphs.
+                                        Permission to make digital or hard copies of all or part of this work for personal or
+                                        classroom use is granted without fee provided that copies are not made or distributed              Existing studies have put forward some approaches to dynamic
+                                        for profit or commercial advantage and that copies bear this notice and the full citation       graph embedding and temporal link prediction. Most of them fo-
+                                        on the first page. Copyrights for components of this work owned by others than the              cus on two main contents: the spatial topological structure and
+                                        author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+                                        republish, to post on servers or to redistribute to lists, requires prior specific permission   the temporal evolutionary information of dynamic graphs. For
+                                        and/or a fee. Request permissions from permissions@acm.org.                                     instance, CTDNE [25] runs temporal random walks to capture
+                                        WWW ’23, April 30-May 4, 2023, Austin, TX, USA                                                  both spatial and temporal information on graphs. TDGNN [30]
+                                        © 2023 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+                                        ACM ISBN 978-1-4503-9416-1/23/04. . . $15.00                                                    introduces a temporal aggregator for GNNs to aggregate historical
+                                        https://doi.org/10.1145/3543507.3583455                                                         information of neighbor nodes and edges. Hawkes process [15, 60]
+WWW ’23, April 30-May 4, 2023, Austin, TX, USA                                                                                                             Qijie Bai, Changli Nie, Haiwei Zhang, Dongming Zhao and Xiaojie Yuan
+
+
+                 1 0 2                                                                                                                           by WaveNet [41] and Graph WaveNet [48], we present hyperbolic
+                                                                         1 ,0 0 0
+
+                                                                                8 0 0                                                            dilated causal convolution (HDCC) modules to obtain hidden cu-
+    # o f n o d e s
+
+
+
+
+                                                                                6 0 0                   H y p e rb o lic                         mulative states of nodes by aggregating historical information and
+
+
+
+
+                                                                       a re a
+                 1 0 1
+                                                                                                                                                 capturing temporal dependencies. In the training process of each
+                                                                                4 0 0
+                                                                                                                                                 snapshot, the hidden cumulative states and spatial-based node rep-
+                                                                                2 0 0                                      E u c lid e a n
+                                                                                                                                                 resentations are fed into a hyperbolic gated recurrent unit (HGRU).
+                 1 0 0                                                                  0
+                         1 0 0   1 0 1            1 0 2        1 0 3                        0   1   2   3       4     5      6      7        8   The outputs of HGRU are regarded as the integration of spatial
+                                    d e g re e o f n o d e s                                                ra d iu s
+                                                                                                                                                 topological structures and temporal evolutionary information, and
+                                             (a )                                                             (b )
+                                                                                                                                                 are utilized for final temporal link prediction. A hyperbolic tempo-
+Figure 1: (a) The degree distribution of real-world network                                                                                      ral consistency (HTC) [52] component is also leveraged to ensure
+MovieLens. Coordinate axes are logarithmic. (b) Areas of cir-                                                                                    stability for tracking the evolution of graphs.
+cles on hyperbolic spaces (curvature 𝑐 = −1) and Euclidean                                                                                          To conclude, the main contributions of this paper are as follows:
+spaces, which shows that the hyperbolic spaces expand ex-                                                                                              • We propose a novel hyperbolic graph neural network model
+ponentially while Euclidean spaces expand polynomially.                                                                                                  named HGWaveNet for temporal link prediction, which
+                                                                                                                                                         learns both spatial hierarchical structures and temporal causal
+                                                                                                                                                         correlation of dynamic graphs.
+is also applied to simulate the evolution of graphs. Furthermore,                                                                                      • With regard to spatial topological structures, we design a hy-
+DyRep [40] leverages recurrent neural networks to update node                                                                                            perbolic diffusion graph convolution (HDGC) module to fit
+representations over time. TGAT [7] uses the multi-head attention                                                                                        the power-law distributions of data and aggregate informa-
+mechanism [42] and a sampling strategy that fixes the number                                                                                             tion from a wider range of nodes with greater effectiveness.
+of neighbor nodes involved in message-propagation to learn both                                                                                        • For temporal evolution, we present hyperbolic dilated causal
+spatial and temporal information.                                                                                                                        convolution (HDCC) modules to capture the internal causal-
+   These methods are all built upon Euclidean spaces. However,                                                                                           ity between snapshots, and a hyperbolic temporal consis-
+recent works [3, 19] have noticed that most real-world graph data,                                                                                       tency (HTC) component is applied to remain stable when
+such as social networks, always exhibit implicit hierarchical struc-                                                                                     learning the evolution of graphs.
+tures and power-law distributions (as shown in Figure 1(a)) rather                                                                                     • We conduct extensive experiments on diverse real-world
+than uniform grid structures which fit Euclidean spaces best. The                                                                                        dynamic graphs. The results prove the superiority of HG-
+mismatches between data distributions and space geometries se-                                                                                           WaveNet, as it has a relative improvement by up to 6.67% in
+verely limit the performances of Euclidean models [4, 26].                                                                                               terms of AUC over state-of-the-art methods.
+   Hyperbolic spaces are those of constant negative curvatures, and
+are found to keep great representation capacity for data with hierar-
+                                                                                                                                                 2     RELATED WORK
+chical structures and power-law distributions due to the exponential
+expansion property (as shown in Figure 1(b)) [19, 29]. In the past                                                                               In this section, we systematically review the relevant works on tem-
+few years, researchers have made some progress in representing                                                                                   poral link prediction and hyperbolic graph representation learning.
+hierarchical data in hyperbolic spaces [4, 22, 26, 27, 33, 44, 52, 56].
+HTGN [52] attempts to embed dynamic graphs into hyperbolic                                                                                       2.1     Temporal Link Prediction
+geometry and achieves state-of-the-art performance. It adopts hy-                                                                                Temporal link prediction on dynamic graphs has attracted increas-
+perbolic GCNs to capture spatial features and a hyperbolic temporal                                                                              ing interests in the past few years. Early methods usually use tra-
+contextual attention module to extract the historical information.                                                                               ditional algorithms or shallow neural architectures to represent
+However, this method faces two major shortcomings. First, for some                                                                               structural and temporal information. For instance, CTDNE [25]
+large graphs with long paths, the message propagation mechanism                                                                                  captures the spatial and temporal information simultaneously by
+of GCNs is not effective enough because only direct neighbor nodes                                                                               adding temporal constraints to random walk. Another example of
+can be calculated in each step. Second, the temporal contextual                                                                                  using temporal random walk is DynNode2vec [23], which updates
+attention module cannot handle the internal order of causal correla-                                                                             the sampled sequences incrementally at each snapshot rather than
+tion in historical data and thus loses valid information for temporal                                                                            generating them anew. DynamicTriad [59] imposes the triad closure
+evolutionary process.                                                                                                                            process and models the evolution of graphs by developing closed
+   To address the two aforementioned shortcomings of HTGN, in                                                                                    triads from open triads. Furthermore, Change2vec [2] improves this
+this paper, we propose a novel hyperbolic graph neural network                                                                                   process and makes it applicable for dynamic heterogeneous graphs.
+model named HGWaveNet for temporal link prediction. In HG-                                                                                       HTNE [60] integrates the Hawkes process into graph embedding
+WaveNet, we first project the nodes into hyperbolic spaces. Then in                                                                              to learn the influence of historical neighbors on current neighbors.
+the aspect of spatial topology, a hyperbolic diffusion graph convo-                                                                                 In contrast, graph neural network methods have recently re-
+lution (HDGC) module is designed to learn node representations of                                                                                ceived increasing attention. GCN [46] provides an excellent node
+each snapshot effectively from both direct neighbors and indirectly                                                                              embedding pattern for general tasks on graphs, and most of later
+connected nodes. For temporal information, recurrent neural net-                                                                                 models take GCN or its variants, such as GraphSAGE [12] and
+works always emphasize short time memory while ignoring that of                                                                                  GAT [43], as basic modules for learning topological structures.
+long time due to the time monotonic assumption [6], and the atten-                                                                               GCRN [36] feeds node representations learned from GCNs into a
+tion mechanism ignores the causal orders in temporality. Inspired                                                                                modified LSTM to obtain the temporal information. Similar ideas are
+HGWaveNet: A Hyperbolic Graph Neural Network for Temporal Link Prediction                                    WWW ’23, April 30-May 4, 2023, Austin, TX, USA
+
+
+explored in EvolveGCN [28], E-LSTM-D [5] and NTF [47]. The main
+difference between EvolveGCN and E-LSTM-D is that EvolveGCN
+could be considered as a combination of GCN and RNN while E-
+LSTM-D uses LSTM together with an encoder-decoder architecture.                                          ℍ
+NTF takes a reverse order that characterizes the temporal inter-
+                                                                                                                   +
+actions with LSTM before adopting the MLP for non-linearities                                                  𝔹   𝑂
+between different latent factors, and sufficiently learns the evolv-                                                −    Geodesics
+ing characteristics of graphs. To better blend the spatial and tem-
+poral node features, DySAT [34] proposes applying multi-head
+                                                                            Figure 2: A hyperbolic manifold H and the corresponding
+self-attention. TGN [31] leverages memory modules with GCN
+                                                                            Poincaré ball model B. The distances on the manifolds are
+operators and significantly increases the computational efficiency.
+                                                                            measured along geodesics.
+TNS [45] provides an adaptive receptive neighborhood for each
+node at any time. VRGNN [11] models the uncertainty of node em-
+beddings by regarding each node in each snapshot as a distribution.         3.1     Problem Definition
+   However, the prevailing methods are built upon Euclidean spaces,         This paper discusses temporal link prediction on discrete dynamic
+which are not isometric with the power-law distributions of real-           graphs. Following [18], we define discrete dynamic graphs as:
+world graphs, and may cause distortion with the graph scale grows.
+                                                                               Definition 3.1 (Discrete Dynamic Graphs). In discrete dynamic
+                                                                            graph modeling, dynamic graphs can be viewed as a sequence of
+2.2    Hyperbolic Graph Representation Learning                             snapshots sampled from the original evolving process at consecutive
+Representation learning in hyperbolic spaces has been noticed due           time points. Formally, discrete dynamic graphs are represented as
+to their fitness to the hierarchical structures of real-world data.         G = (G0, G1, · · · , G𝑇 ), in which G𝑡 is a snapshot at timestamp 𝑡. The
+The significant performance advantages shown by the shallow                 time granularity for snapshot divisions could be hours, days, months
+Poincaré [26] and Lorentz [27] models spark more attempts to                or even years depending on specific datasets and applications.
+this issue. Integrated with graph neural networks, HGNN [22] and
+                                                                               Based on Definition 3.1, temporal link prediction is described as:
+HGCN [4] are designed for graph classification and node embedding
+tasks separately. HAT [56] exploits attention mechanism for hyper-             Definition 3.2 (Temporal Link Prediction). The aim of temporal
+bolic node information propagation and aggregation. LGCN [57]               link prediction is to predict the links appeared in the snapshots after
+builds the graph operations of hyperbolic GCNs with Lorentzian              timestamp 𝑡 based on the observed snapshots before timestamp 𝑡.
+version and rigorously guarantees that the learned node features            Formally, the model takes (G0, G1, · · · , G𝑡 −1 ) as input in the training
+follow the hyperbolic geometry. The above hyperbolic GNN-based              process, and then makes predictions on (G𝑡 , G𝑡 +1, · · · , G𝑇 ).
+models all adopt the bi-directional transition between a hyper-
+bolic space and corresponding tangent spaces, while a tangent               3.2     Hyperbolic Geometry of the Poincaré Ball
+space is the first-order approximation of the original space and            The 𝑛-dimensional hyperbolic space (H𝑐𝑛 , 𝑔𝑐,H ) is the unique simply
+may inevitably cause distortion. To avoid distortion, H2H-GCN [8]           connected 𝑛-dimensional complete Riemannian manifold H𝑐𝑛 with a
+develops a manifold-preserving graph convolution and directly               constant negative curvature −𝑐 (𝑐 > 0), and 𝑔𝑐,H is the Riemannian
+works on hyperbolic manifolds. For practical application situations,        metric. The tangent space Tx H𝑐𝑛 is a Euclidean, local, first-order
+HGCF [37], HRCF [53] and HICF [51] study the hyperbolic collab-             approximation of H𝑐𝑛 around the point x ∈ H𝑐𝑛 . Similar to [26]
+orative filtering for user-item recommendation systems. Through             and [9], we construct our method based on the Poincaré ball, one
+hyperbolic graph learning, HyperStockGAT [35] captures the scale-           of the most widely used isometric models of hyperbolic spaces.
+free spatial and temporal dependencies in stock prices, and achieves        Corresponding to (H𝑐𝑛 , 𝑔𝑐,H ), the Poincaré ball (B𝑐𝑛 , 𝑔𝑐,B ) is defined
+state-of-the-art stock forecasting performance.                             as
+   HVGNN [38] and HTGN [52] fill the gap of hyperbolic models                              B𝑐𝑛 := x ∈ R𝑛 : 𝑐 ∥x∥ 2 < 1 ,
+                                                                                                 
+on dynamic graphs. HVGNN generates stochastic node represen-
+                                                                                                      𝑐 2 𝐸                2                       (1)
+tations of hyperbolic normal distributions via a hyperbolic graph                          𝑔𝑐,B
+                                                                                            x := 𝜆x 𝑔 , 𝜆x :=
+                                                                                                                  𝑐
+                                                                                                                                    ,
+variational autoencoder to represent the uncertainty of dynamics.                                                      1 − 𝑐 ∥x∥ 2
+HTGN adopts a conventional model architecture that handles the              where 𝑔𝐸 = I𝑛 is the Euclidean metric tensor.
+                                                                                                                                             √
+spatial and temporal information with HGCNs and contextual at-                 The Poincaré ball manifold B𝑐𝑛 is an open ball of radius 1/ 𝑐
+tention modules separately, however, ignores the causal order in the        (see Figure 2). The induced distance between two points x, y ∈ B𝑐𝑛
+graph evolution. To further improve the hyperbolic graph models             is measured along a geodesic and given by1
+especially on temporal link prediction problem, we propose our                                         2            √                 
+HGWaveNet in terms of discrete dynamic graphs.                                           𝑑𝑐 (x, y) = √ · tanh−1 𝑐 ∥ − x ⊕𝑐 y∥ ,              (2)
+                                                                                                        𝑐
+                                                                            in which the Möbius addition ⊕𝑐 in B𝑐𝑛 is defined as
+3     PRELIMINARIES
+                                                                                                1 + 2𝑐 ⟨x, y⟩ + 𝑐 ∥y∥ 2 x + 1 − 𝑐 ∥x∥ 2 y
+                                                                                                                                        
+In this section, we first give the formalized definitions of discrete               x ⊕𝑐 y :=                                              . (3)
+dynamic graphs and temporal link prediction. Then some critical                                        1 + 2𝑐 ⟨x, y⟩ + 𝑐 2 ∥x∥ 2 ∥y∥ 2
+fundamentals about hyperbolic geometry are introduced.                      1 −x ⊕ y should be read as (−x) ⊕ y rather than −( x ⊕ y) .
+                                                                                  𝑐                          𝑐                    𝑐
+WWW ’23, April 30-May 4, 2023, Austin, TX, USA                                      Qijie Bai, Changli Nie, Haiwei Zhang, Dongming Zhao and Xiaojie Yuan
+
+
+   To map points between hyperbolic spaces and tangent spaces,                                                  𝒍=𝟏                                     𝒍=𝟐
+
+exponential and logarithmic maps are given [9]. For x, y ∈ B𝑐𝑛 , v ∈
+Tx B𝑐𝑛 , x ≠ y and v ≠ 0, the exponential map exp𝑐x : Tx B𝑐𝑛 → B𝑐𝑛 is        𝒌=𝟎                                HGCN                                    HGCN
+                                   √ 𝑐
+
+
+
+
+                                                                                                                                                                           output representations
+                                                     
+                 𝑐                    𝑐𝜆x ∥v∥     v
+              expx (v) = x ⊕𝑐 tanh              √                 (4)
+
+
+
+
+                                                                                               input features
+                                                         ,
+
+
+
+
+                                                                                                                                        hidden states
+                                         2       𝑐 ∥v∥
+
+
+
+
+                                                                                                                                                               attention
+                                                                                                                            attention
+and the logarithmic map log𝑐x : B𝑐𝑛 → Tx B𝑐𝑛 is                              𝒌=𝟏                                HGCN                                    HGCN
+
+                                        −x ⊕𝑐 y
+                log𝑐x (y) = 𝑑𝑐 (x, y) 𝑐             ,            (5)
+                                     𝜆x ∥ − x ⊕𝑐 y∥
+                                                                             𝒌=𝟐                                HGCN                                    HGCN
+where 𝜆𝑐x and 𝑑𝑐 (x, y) are the same as in Equations (1) and (2). In
+our method, we use the origin point o as the reference point x to
+balance the errors in diverse directions.
+                                                                          Figure 3: A hyperbolic diffusion graph convolution (HDGC)
+4     METHODOLOGY                                                         module with the number of layers 𝐿 = 2 and the number of
+This section describes our proposed model HGWaveNet. First, we            diffusion steps 𝐾 = 2. The part in red dashed rectangle is a
+elaborate on the details of two core components: hyperbolic dif-          complete HDGC layer.
+fusion graph convolution (HDGC) and hyperbolic dilated causal
+convolution (HDCC). Then other key modules contributing to HG-
+WaveNet are introduced, including gated HDCC, hyperbolic gated            matrices are added to each step for specific objective tasks. Then,
+recurrent unit (HGRU), hyperbolic temporal consistency (HTC) and          the diffusion convolution layer on graphs is defined as
+Fermi-Dirac decoder. Finally, we summarize the overall framework                                                      𝐾
+                                                                                                                     ∑︁
+of HGWaveNet and analyse the time complexity.                                                                   Z=         A𝑘 XW𝑘 ,                                                                 (11)
+                                                                                                                     𝑘=0
+4.1     Hyperbolic Diffusion Graph Convolution                            in which A is the bi-direct adjacent matrix, X is the input node
+Hyperbolic graph convolutional neural networks (HGCNs [4]) are            features, W𝑘 is the weight matrix for the 𝑘-th diffusion step, and Z
+built analogous to traditional GNNs. A typical HGCN layer consists        is the output node representations.
+of three key parts: hyperbolic feature transform                              On account of the sparsity of real-world data, we convert the
+                                                                          graph convolution into equivalent spatial domains for efficiency.
+                    h𝑙,B  𝑙         𝑙−1,B
+                     𝑖 = W ⊗𝑐 𝑙 −1 x𝑖     ⊕𝑐 𝑙 −1 b𝑙 ,              (6)
+                                                                          Do all above operations in the hyperbolic space, and replace the
+attention-based neighbor aggregation                                      summation in Equation (11) with an attention mechanism for better
+        y𝑙,B            𝑙,B                                               information aggregation. Then, the 𝑘-th step of hyperbolic diffusion
+         𝑖 = Agg𝑐 𝑙 (h )𝑖
+                                                            (7)   graph convolution at layer 𝑙 is
+                    𝑙                         𝑙 −1
+             = exp𝑐o Att Concat 𝑗 ∈N (𝑖) log𝑐o       h𝑙,B
+                                                      𝑗         ,                                                      
+                                                                                              X𝑙𝑘 = HGCN𝑐 𝑙 A𝑘 , X𝑙−1 ,                    (12)
+and hyperbolic activation                                                                                                  𝑘
+                                                                    where HGCN𝑐 𝑙 (·) is the conjunctive form of Equations (6), (7),
+                                𝑐𝑙     𝑐𝑙
+                    x𝑙,B
+                     𝑖   = expo  𝜎  logo    y𝑙,B
+                                             𝑖       ,              (8)   and (8) with the adjacent matrix and node features as inputs. X𝑙 is
+                                                                          calculated as
+in which W𝑙 , b𝑙 are trainable parameters and x𝑙,B  𝑖 is the repre-                                                  
+sentation of node 𝑖 at layer 𝑙 in manifold B𝑛𝑙 . Following [52], the                            𝑙                  𝑐𝑙
+                                            𝑐                                         X𝑙 = exp𝑐o Att Concat𝑘 logo𝑘 X𝑙𝑘          .        (13)
+matrix-vector multiplication ⊗𝑐 is defined as
+                                    
+       M ⊗𝑐 x := exp𝑐o M log𝑐o (x) , M ∈ R𝑛×𝑛 , x ∈ B𝑐𝑛 .         (9)     Hyperbolic diffusion graph convolution is finally constructed with
+                                                                          the stack of layers defined by Equations (13) and (12), as sketched
+   However, the shallow HGCN can only aggregate information               in Figure 3.
+of direct neighbors and is not effective enough for large graphs
+with long paths. To overcome this shortcoming, we impose the              4.2    Hyperbolic Dilated Causal Convolution
+diffusion process referring to [21]. Consider a random walk process
+with restart probability 𝛼 on G, and a state transition matrix P          Causal convolution refers to applying a convolution filter only
+(for most situations, P is the normalized adjacent matrix). Such          to data at past timestamps [41], and guarantees that the order of
+Markov process converges to a stationary distribution P ∈ R𝑛×𝑛            data modeling is not violated, which means that the prediction
+after many steps, the 𝑖-th row of which is the likelihood of diffusion    𝑝 (𝑥𝑡 |𝑥 0, 𝑥 1, · · · , 𝑥𝑡 −1 ) emitted by the model at timestamp 𝑡 cannot
+from node 𝑖. The stationary distribution P can be calculated in the       depend on future data 𝑥𝑡 , 𝑥𝑡 +1, · · · , 𝑥𝑇 . For 1-D temporal informa-
+closed form [39]                                                          tion, this operation can be implemented by shifting the output
+                             ∞
+                             ∑︁                                           of a normal convolution with kernel size 𝑆 by ⌊𝑆/2⌋ steps, but a
+                        P=       𝛼 (1 − 𝛼)𝑘 P𝑘 ,                  (10)    sufficiently large receptive field requires stacking many layers. To
+                               𝑘=0                                        decrease the computational cost, dilated convolutions are adopted.
+where 𝑘 is the diffusion step. In practice, a finite 𝐾-step truncation    By skipping the inputs with a certain step 𝑑, a dilated convolution
+of the diffusion process is adopted and separate trainable weight         applies its kernel over a larger area than its length, and with the
+HGWaveNet: A Hyperbolic Graph Neural Network for Temporal Link Prediction                                 WWW ’23, April 30-May 4, 2023, Austin, TX, USA
+
+
+                                                          output            where F1 and F2 are different convolution kernels for two HDCCs,
+                                                          𝒅=𝟒               H𝑖,𝑡 ∈ B𝑐𝑛 (𝑡 ≤ 𝑇 ) is the historical hidden state of node 𝑖 at snapshot
+                                                                            G𝑡 , and · denotes element-wise product. In addition, to enable a
+                                                          𝒅=𝟐
+                                                                            deeper model for learning more implicit information, residual and
+                                                                            skip connections are applied throughout the gated HDCC layers.
+
+                                                          𝒅=𝟏               4.3.2 Hyperbolic Gated Recurrent Unit. HGRU [52] is the hyper-
+                                                                            bolic variant of GRU [6]. Performed in the tangent space, HGRU
+                                                          input
+                                                                            computes the output with high efficiency from historical hidden
+                                                                            states and current input features, as
+                                                                                                                                 
+Figure 4: A stacked hyperbolic dilated causal convolution                             Z𝑖,𝑡 = exp𝑐o GRU log𝑐o X𝑖,𝑡 , log𝑐o H𝑖,𝑡 −1 .     (16)
+(HDCC) module with dilated depth 𝐷 = 3 and kernel size
+                                                                            In HGWaveNet, the historical hidden states are from gated HDCC
+𝑆 = 2. Each circle refers to one node at a timestamp. Under
+                                                                            module, so we use a single HGRU cell for just one step rather than
+the exponentially large receptive field, each node preserves
+                                                                            linking it into recursion.
+the temporal causal correlations with the past 𝑆 𝐷 snapshots.
+                                                                            4.3.3 Hyperbolic Temporal Consistency. In real-world graphs, the
+                                                                            evolution proceeds continuously. Correspondingly, the node repre-
+stack of dilated convolution layers, the receptive field expands ex-        sentations are expected to change gradually in terms of temporality,
+ponentially while preserving high computational efficiency. Based           which means that the node representations at two consecutive
+on the above definitions of causal convolutions and dilated convo-          snapshots should keep a short distance. Hence, HTC [52] defines a
+lutions, the dilated causal convolution operation in manifold B𝑐𝑛           similarity constraint penalty between Z𝑡 −1 and Z𝑡 at snapshot G𝑡
+can be formalized mathematically as                                         as
+                                                       !                                                   𝑁
+                               𝑆−1
+                               ∑︁                                                               𝑡       1 ∑︁                  
+             (Z𝑖 ⊙ F)𝑡 = expo𝑐            𝑐          
+                                   F𝑠 logo Z𝑖,𝑡 −𝑑×𝑠 ,          (14)                          LHTC   =        𝑑𝑐 Z𝑖,𝑡 −1, Z𝑖,𝑡 ,           (17)
+                                                                                                        𝑁 𝑖=1
+                                   𝑠=0
+where 𝑑 is the dilation step, Z𝑖,𝑡 ∈ B𝑐𝑛 (𝑡 ≤ 𝑇 ) is the representation     where 𝑑𝑐 (·) is defined in Equation (2) and 𝑁 is the number of nodes.
+of node 𝑖 at snapshot G𝑡 and F ∈ R𝑆×𝑛 denotes the kernels for               By adding the penalty in optimization process, HTC ensures that
+all dimensions (also called channels). A stacked hyperbolic dilated         the node representations do not change rapidly and the stability of
+causal convolution module is shown in Figure 4.                             graph evolution is achieved.
+    Compared to attention-based historical information aggrega-             4.3.4 Fermi-Dirac Decoder. As a generalization of sigmoid, Fermi-
+tion [52], HDCC can learn the internal order of causal correlation          Dirac decoder [19] gives a probability score for edges between nodes
+in temporality. Meanwhile, compared to RNNs, HDCC allows par-               𝑖 and 𝑗, which fits the temporal link prediction problem greatly. It
+allel computation and alleviates vanishing or exploding gradient            is defined as
+problems due to its non-recursion[48]. Considering the superior-                                                          1
+ity of HDCC on sequence problems, we leverage this module in                            𝑝 𝐹 −𝐷 (x𝑖 , x 𝑗 ) =                         ,    (18)
+                                                                                                             exp 𝑑𝑐 x𝑖 , x 𝑗 − 𝑟 /𝑠 + 1
+handling the temporal evolutionary information of graphs.
+                                                                            where 𝑟 and 𝑠 are hyper-parameters, and x𝑖 , x 𝑗 ∈ B𝑐𝑛 are hyperbolic
+4.3    Other Key Modules in HGWaveNet                                       representations of nodes 𝑖 and 𝑗.
+Except for HDGC and HDCC, some other modules contribute
+greatly to our proposed HGWaveNet. Based on HDCC, we further                4.4    Framework of HGWaveNet
+design gated HDCC to preserve the valid historical information.             With all modules introduced above, we now summarize the overall
+Hyperbolic gated recurrent unit (HGRU) [52] is able to efficiently          framework of HGWaveNet in Figure 5. For the snapshot G𝑡 −1 ∈ G,
+learn the latest node representations in Poincaré ball from historical      we first project the input node features into the hyperbolic space
+states and current spatial characteristics. Additionally, as defined        with exponential map, and then an HDGC module is applied to
+in [52], hyperbolic temporal consistency (HTC) module provides a            learn the spatial topological structure characteristics denoted by
+similarity constraint in temporality to ensure stability during graph       X𝑡 −1 . Simultaneously, the stacked gated HDCC layers calculate the
+evolution. Finally, a Fermi-Dirac decoder [19] is used to compute           latest historical hidden state H𝑡 −2 from previous node representa-
+the probability scores for edge reconstruction.                             tions Z𝑡 −2, Z𝑡 −3, · · · (the initial historical node representations are
+                                                                            padded randomly at the beginning of training). Next, the spatial
+4.3.1 Gated HDCC. As shown in the left part of Figure 5, we adopt
+                                                                            information X𝑡 −1 and the temporal information H𝑡 −2 are inputted
+a simple gating mechanism on the outputs of HDCCs. What is
+                                                                            into a single HGRU cell. The output of HGRU Z𝑡 −1 is exactly the
+noteworthy is the use of logarithmic map before the Euclidean acti-
+                                                                            new latest node representations at snapshot G𝑡 −1 , and is fed into
+vation functions and exponential map after gating. The formulation
+                                                                            the Fermi-Dirac decoder to make temporal link predictions for
+is described as
+                                                                         snapshot G𝑡 .
+   H𝑖,𝑡 = exp𝑐o tanh log𝑐o ((Z𝑖 ⊙ F1 )𝑡 ) · 𝜎 log𝑐o ((Z𝑖 ⊙ F2 )𝑡 ) ,           To maximize the probability of connected nodes in G𝑡 and mini-
+                                                                   (15)     mize the probability of unconnected nodes, we use a cross-entropy
+WWW ’23, April 30-May 4, 2023, Austin, TX, USA                                                                 Qijie Bai, Changli Nie, Haiwei Zhang, Dongming Zhao and Xiaojie Yuan
+
+
+
+                                                                       𝓖𝒕−𝟏                                              Table 1: Statistics of datasets.
+                     residual
+                   residualnext layer                HDGC                                                 Datasets     Enron     DBLP     AS733         FB      HepPh       MovieLens
+              residual
+                                                                                                         # Nodes         184      315      6,628      45,435     15,330       9,746
+                               1ⅹ1
+                              1ⅹ1                  𝑿𝒕−𝟏                                                  # Edges         790      943     13,512      180,011    976,097     997,837
+                      1ⅹ1                                                     𝒁𝒕−𝟏                     # Snapshots       11       10        30          36         36           11
+                                  ×
+                              ×
+                                                     HGRU                                              Train : Test      8:3      7:3     20:10        33:3       30:6         8:3
+                                                                                                            𝛿            1.5      2.0       1.5         2.0        1.0         2.0
+                    tanh×                  σ
+                  tanh                 σ                                      Fermi-
+               tanh               σ                𝑯𝒕−𝟐
+                                                                               Dirac
+                  HDCC                 HDCC                                   Decoder                                            Table 2: Baselines.
+                 HDCC                 HDCC
+              HDCC            HDCC                                                                                      Methods         Static/dynamic          Manifolds
+                                           skip
+                                                                                                                       HGCN [4]              Static              Lorentz
+                                                                              prediction                                HAT[56]              Static             Poincaré
+         𝒁𝟎      𝒁𝟏      𝒁𝟐       …    𝒁𝒕−𝟑 𝒁𝒕−𝟐           HTC                  for 𝓖𝒕                               EvolveGCN [28]         Dynamic             Euclidean
+                                                                                                                      GRUGCN [36]           Dynamic             Euclidean
+      dataflow            Möbius addition          exponential map               logarithmic map                        TGN [31]            Dynamic             Euclidean
+                                                                                                                       DySAT [34]           Dynamic             Euclidean
+                                                                                                                       HTGN [52]            Dynamic             Poincaré
+Figure 5: The overall framework of HGWaveNet. For G𝑡 −1 ,
+the historical evolutionary information handled by gated
+HDCCs and the spatial topological information handled by                                            aggregated by HDGC, and the causality of historical information
+HDGC are fed into an HGRU module. With the constraint of                                            in the evolutionary process learned by HDCC.
+HTC, the hyperbolic outputs are decoded by a Fermi-Dirac
+decoder and the temporal link prediction for G𝑡 is made.                                            5.1     Experimental Setup
+                                                                                                    5.1.1 Datasets. We evaluate our proposed model and baselines on
+           𝑡 defined as                                                                             six real-world datasets from diverse areas, including email com-
+like loss L𝐶𝐸
+                                                                                                    munication networks Enron2 [1], academic co-author networks
+                                                                                                    DBLP3 [11] and HepPh4 [20], Internet router networks AS7335 [20],
+        𝑡                                                              
+      L𝐶𝐸  =Avg𝑖∼𝑡 𝑗 − log 𝑝 𝐹 −𝐷                  Z𝑖,𝑡 −1, Z 𝑗,𝑡 −1         +
+                                                                                          (19)   social networks FB6 [32] and movie networks MovieLens7 [13]. The
+                 Avg𝑖 ′ ≁𝑡 𝑗 ′ − log 1 − 𝑝 𝐹 −𝐷 Z𝑖 ′,𝑡 −1, Z 𝑗 ′,𝑡 −1                   ,
+                                                                                                    statistics of these datasets are shown in Table 1. We take the same
+in which ∼𝑡 denotes the connection at snapshot G𝑡 between two                                       splitting ratios for training and testing as [52] on all datasets except
+nodes, and ≁𝑡 is the opposite. (𝑖 ′, 𝑗 ′ ) is the sampled negative edge                             MovieLens on which a similar manner is adopted. Gromov’s hyper-
+for accelerating training and preventing over-smoothing. Taking                                     bolicity [10] 𝛿 is used to measure the tree-likeness and hierarchical
+the HTC module into account and summing up all snapshots, the                                       properties of graphs. A lower 𝛿 denotes a more tree-like structure
+complete loss function is                                                                           and 𝛿 = 0 denotes a pure tree. The datasets we choose all remain
+                                                                                                    implicitly hierarchical and show distinct power-law distributions.
+                                        𝑇
+                                       ∑︁
+                                                𝑡      𝑡   
+                               L=              L𝐶𝐸 + 𝜆L𝐻𝑇𝐶   .                               (20)   5.1.2 Baselines. Considering that HGWaveNet is constructed in
+                                       𝑡 =0                                                         the hyperbolic space for dynamic graphs, we choose seven com-
+   Time Complexity Analysis. We analyse the time complexity of                                      peting baselines either in hyperbolic spaces or built for dynamic
+our proposed HGWaveNet by module for each snapshot. For the                                         graphs to verify the superiority of our model. The baselines are
+HDGC module, the computation is of O ((𝑁𝑑 2 + |E𝑡 |𝐾𝑑)𝐿), where                                     summarized in Table 2, where HTGN on Poincaré ball shows state-
+𝑑 is the dimension of node representations, |E𝑡 | is the edge number                                of-the-art performance in most evaluations.
+for snapshot G𝑡 , 𝐾 is the truncated diffusion steps and 𝐿 is the                                   5.1.3 Evaluation Tasks and Metrics. Similar to [52], our experi-
+layer number of HDGC. For gated HDCC, the time complexity is                                        ments consist of two different tasks: temporal link prediction and
+O (𝑆 𝐷 𝑑𝐷 ′ ), in which 𝑆 and 𝐷 are the kernel size and dilated depth                               temporal new link prediction. Specifically, temporal link prediction
+of a single HDCC, respectively, and 𝐷 ′ is the layer number of the                                  aims to predict the edges that appear in G𝑡 and other snapshots af-
+complete gated HDCC module. HGRU and HTC run only once for                                          ter timestamp 𝑡 based on the training on (G0, G1, · · · , G𝑡 −1 ), while
+each snapshot, and both take the time complexity of O (𝑁𝑑). For                                     temporal new link prediction aims to predict those in G𝑡 but not in
+Fermi-Dirac decoder, the time complexity is O (|E𝑡 |𝑑 + |E˜𝑡 |𝑑), in                                G𝑡 −1 . To quantify the experimental performance, we choose the
+which |E˜𝑡 | is the number of negative samples for snapshot G𝑡 .                                    widely used metrics average precision (AP) and area under ROC
+                                                                                                    curve (AUC). The datasets are split into training sets and test sets
+5    EXPERIMENTS AND ANALYSIS                                                                       as shown in Table 1 by snapshots to run both our proposed model
+In this section, we conduct extensive experiments on six real-world                                 and baselines on the above tasks.
+graphs and prove the superiority of our proposed HGWaveNet. In                                      2 https://www.cs.cornell.edu/~arb/data/email-Enron/
+                                                                                                    3 https://github.com/VGraphRNN/VGRNN/tree/master/data
+addition, we also conduct ablation studies and hyper-parameter
+                                                                                                    4 https://snap.stanford.edu/data/cit-HepPh.html
+analysis to corroborate the three primary ideas of our method: the                                  5 https://snap.stanford.edu/data/as-733.html
+fitness between graph distributions and hyperbolic geometry, the                                    6 https://networkrepository.com/ia-facebook-wall-wosn-dir.php
+
+effectiveness of spatial information from a wider range of neighbors                                7 https://grouplens.org/datasets/movielens/
+HGWaveNet: A Hyperbolic Graph Neural Network for Temporal Link Prediction                                                                                 WWW ’23, April 30-May 4, 2023, Austin, TX, USA
+
+
+                                                                  Table 3: Performance on temporal link prediction.
+                 Dataset               Enron                         DBLP                          AS733                              FB                       HepPh                     MovieLens
+                 Metric         AUC             AP            AUC             AP            AUC             AP            AUC              AP            AUC             AP            AUC       AP
+                 HGCN        93.96 ± 0.09   93.55 ± 0.06   89.16 ± 0.16   91.63 ± 0.22   96.34 ± 0.05   93.28 ± 0.11   86.11 ± 0.13    83.74 ± 0.15   90.64 ± 0.07   88.98 ± 0.09   84.89 ± 0.40   77.98 ± 0.66
+                  HAT        94.49 ± 0.11   94.63 ± 0.08   89.29 ± 0.18   90.15 ± 0.14   96.09 ± 0.01   93.21 ± 0.02   84.02 ± 0.09    83.03 ± 0.15   90.52 ± 0.04   89.53 ± 0.04   86.26 ± 0.14   84.19 ± 0.21
+   Baselines
+
+
+
+
+               EvolveGCN     90.12 ± 0.69   92.71 ± 0.34   83.88 ± 0.53   87.53 ± 0.22   92.47 ± 0.04   95.28 ± 0.01   76.85 ± 0.85    80.87 ± 0.64   76.82 ± 1.46   81.18 ± 0.89   55.41 ± 1.55   69.41 ± 1.00
+                GRUGCN       92.47 ± 0.36   93.38 ± 0.24   84.60 ± 0.92   87.87 ± 0.58   94.96 ± 0.35   96.64 ± 0.22   79.38 ± 1.02    82.77 ± 0.75   82.86 ± 0.53   85.87 ± 0.23   71.01 ± 0.77   79.04 ± 0.53
+                  TGN        91.77 ± 1.04   85.36 ± 0.87   87.20 ± 0.82   84.87 ± 0.80   93.19 ± 1.03   92.27 ± 0.83   80.85 ± 0.23    81.92 ± 1.34   74.78 ± 0.47   74.61 ± 0.43   71.52 ± 0.59   70.53 ± 0.38
+                 DySAT       93.06 ± 0.97   93.06 ± 1.05   87.25 ± 1.70   90.40 ± 1.47   95.06 ± 0.21   96.72 ± 0.12   76.88 ± 0.08    80.39 ± 0.14   81.02 ± 0.25   84.47 ± 0.23   70.21 ± 0.58   78.41 ± 0.33
+                 HTGN        94.17 ± 0.17   94.31 ± 0.26   89.26 ± 0.17   91.91 ± 0.07   98.75 ± 0.03   98.41 ± 0.03   83.70 ± 0.33    83.80 ± 0.43   91.13 ± 0.14   89.52 ± 0.28   86.80 ± 0.34   85.40 ± 0.19
+   Ours
+
+
+
+
+               HGWaveNet 96.86 ± 0.08 97.04 ± 0.07 89.96 ± 0.27 92.12 ± 0.18 98.78 ± 0.01 98.53 ± 0.02 89.51 ± 0.28 86.88 ± 0.29 92.37 ± 0.04 91.48 ± 0.05 91.90 ± 0.06 90.65 ± 0.12
+                Gain(%)     +2.51        +2.55        +0.75        +0.23        +0.03        +0.12        +3.95        +3.68        +1.36        +2.18        +5.88        +6.15
+                w/o HDGC     94.95 ± 0.10 95.24 ± 0.07 89.51 ± 0.24 91.84 ± 0.17 97.97 ± 0.20 97.35 ± 0.24 85.99 ± 0.29 82.77 ± 0.48 90.61 ± 0.22 89.68 ± 0.03 84.35 ± 0.12 82.77 ± 0.38
+                 Gain(%)         -1.97        -1.85        -0.50        -0.30        -0.82        -1.20        -3.93        -4.73        -1.91        -1.97        -8.22        -8.69
+   Ablation
+
+
+
+
+                w/o HDCC     95.33 ± 0.09 95.64 ± 0.09 89.56 ± 0.22 92.04 ± 0.12 97.83 ± 0.17 97.25 ± 0.21 85.13 ± 0.16 82.38 ± 0.88 90.83 ± 0.20 89.77 ± 0.32 82.46 ± 0.37 80.29 ± 0.58
+                 Gain(%)         -1.58        -1.44        -0.44        -0.09        -0.96        -1.30        -4.89        -5.18        -1.67        -1.87       -10.27       -11.43
+                  w/o B      92.62 ± 0.55 93.77 ± 0.33 85.18 ± 0.29 87.76 ± 0.11 95.21 ± 0.11 96.85 ± 0.08 79.20 ± 0.34 82.45 ± 0.21 76.31 ± 0.75 78.11 ± 0.29 73.70 ± 0.54 80.15 ± 0.54
+                 Gain(%)         -4.38        -3.37        -5.31        -4.73        -3.61        -1.71       -11.52        -5.10       -17.39       -14.62       -19.80       -11.58
+∗ For evaluations on baselines and our model, the best results are in bold, and the suboptimal results are underlined. The same applies to Table 4.
+★ Part of results are from [52] under the same experimental setup. The same applies to Table 4.
+
+
+
+                                                              Table 4: Performance on temporal new link prediction.
+                 Dataset              Enron                         DBLP                          AS733                           FB                           HepPh                     MovieLens
+                 Metric         AUC             AP            AUC             AP            AUC             AP            AUC              AP            AUC             AP            AUC       AP
+                 HGCN        90.36 ± 0.16   88.33 ± 0.55   81.20 ± 0.19   83.28 ± 0.23   92.33 ± 0.12   88.31 ± 0.16   81.04 ± 0.14    80.59 ± 0.13   89.64 ± 0.27   87.87 ± 0.11   85.27 ± 0.35   78.56 ± 0.49
+                  HAT        90.34 ± 0.10   88.60 ± 0.19   79.29 ± 0.15   82.58 ± 0.08   91.65 ± 0.08   90.13 ± 0.15   83.05 ± 0.10    82.96 ± 0.18   89.63 ± 0.05   88.34 ± 0.04   86.54 ± 0.16   84.60 ± 0.25
+  Baselines
+
+
+
+
+               EvolveGCN     82.85 ± 0.97   85.01 ± 0.22   73.49 ± 0.86   77.11 ± 0.44   75.82 ± 0.67   83.57 ± 0.46   74.49 ± 0.89    78.33 ± 0.66   74.79 ± 1.61   79.04 ± 1.02   55.45 ± 1.53   69.35 ± 0.98
+                GRUGCN       87.59 ± 0.57   88.41 ± 0.45   75.60 ± 1.60   78.55 ± 1.05   83.14 ± 1.21   88.14 ± 0.76   77.69 ± 1.03    81.07 ± 0.77   81.97 ± 0.49   84.78 ± 0.22   71.32 ± 0.77   79.51 ± 0.50
+                  TGN        86.75 ± 0.59   81.37 ± 0.42   81.83 ± 1.08   81.61 ± 0.62   87.89 ± 0.63   84.94 ± 0.94   78.93 ± 0.98    76.57 ± 0.63   74.21 ± 0.78   76.12 ± 0.54   72.22 ± 0.68   70.90 ± 0.40
+                 DySAT       87.94 ± 3.78   86.83 ± 5.01   79.74 ± 4.35   83.47 ± 3.01   82.84 ± 0.72   89.07 ± 0.57   74.97 ± 0.12    78.34 ± 0.07   79.01 ± 0.26   82.53 ± 0.25   70.63 ± 0.58   79.02 ± 0.33
+                 HTGN        91.26 ± 0.27   90.62 ± 0.34   81.74 ± 0.56   84.06 ± 0.41   96.62 ± 0.22   95.52 ± 0.25   82.21 ± 0.41    81.70 ± 0.46   90.11 ± 0.14   88.18 ± 0.31   87.06 ± 0.25   85.82 ± 0.29
+  Ours
+
+
+
+
+               HGWaveNet 93.49 ± 0.08 92.51 ± 0.10 84.26 ± 0.46 86.19 ± 0.33 96.99 ± 0.07 95.60 ± 0.10 88.59 ± 0.28 86.00 ± 0.30 91.45 ± 0.05 90.21 ± 0.04 92.04 ± 0.04 90.66 ± 0.07
+                Gain(%)     +2.44        +2.09        +2.97        +2.53        +0.38        +0.08        +6.67        +3.66        +1.49        +2.12        +5.72        +5.64
+               w/o HDGC      90.67 ± 0.20 89.90 ± 0.22 83.47 ± 0.36 85.85 ± 0.28 95.69 ± 0.34 93.99 ± 0.36 84.96 ± 0.30 81.57 ± 0.42 89.63 ± 0.26 88.27 ± 0.03 84.76 ± 0.15 83.42 ± 0.33
+                Gain(%)          -3.02        -2.82        -0.94        -0.39        -1.34        -1.68        -4.10        -5.15        -1.99        -2.15        -7.91        -7.99
+  Ablation
+
+
+
+
+               w/o HDCC      91.76 ± 0.08 90.87 ± 0.06 82.36 ± 0.23 84.87 ± 0.10 94.56 ± 0.44 92.91 ± 0.45 84.03 ± 0.14 80.99 ± 0.76 89.87 ± 0.20 88.42 ± 0.30 82.92 ± 0.31 81.23 ± 0.50
+                Gain(%)          -1.85        -1.77        -2.25        -1.53        -2.51        -2.81        -5.15        -5.83        -1.73        -1.98        -9.91       -10.40
+                  w/o B      87.10 ± 0.72 88.49 ± 0.57 76.65 ± 0.80 79.53 ± 0.67 84.85 ± 0.77 89.59 ± 0.37 77.37 ± 0.33 80.63 ± 0.19 74.23 ± 0.58 76.21 ± 0.53 74.11 ± 0.55 80.51 ± 0.31
+                 Gain(%)         -6.83        -4.35        -9.03        -7.73       -12.52        -6.29       -12.67        -6.24       -18.83       -15.52       -19.48       -11.20
+
+
+
+5.2              Experimental Results                                                                            5.2.2 Temporal New Link Prediction. The results on temporal new
+We implement HGWaveNet8 with PyTorch on Ubuntu 18.04. Each                                                       link prediction are shown in Table 4. This task aims to predict the
+experiment is repeated five times to avoid random errors, and the                                                edges unseen in the training process and evaluates the inductive
+average results (with form average value ± standard deviation) on                                                ability of models. Our model shows greater advantages, and similar
+the test sets are reported in Table 3 and Table 4. Next, we discuss                                              gaps with those on temporal link prediction between small and
+the experimental results on each evaluation task separately.                                                     large graphs appear again. Another observed fact is that even for
+                                                                                                                 the inductive evaluation task, the two hyperbolic static methods
+5.2.1 Temporal Link Prediction. The results on temporal link pre-                                                HGCN and HAT have a relatively better performance than the
+diction are shown in Table 3. Obviously, our HGWaveNet outper-                                                   Euclidean dynamic models. This observation further demonstrates
+forms all baselines including the hyperbolic state-of-the-art model                                              the excellence of modeling real-world graphs on hyperbolic spaces.
+HTGN both on AUC and AP. To analyse the results further, we intu-
+itively divide the six datasets into two groups: small (Enron, DBLP,
+AS733) and large (FB, HepPh, MovieLens), according to the scales. It                                             5.3       Ablation Study
+can be observed that the superiority of our model is more significant                                            To asses the contribution of each component, we conduct the fol-
+on large graphs than small ones compared with baselines, espe-                                                   lowing ablation study on three HGWaveNet variants:
+cially those Euclidean methods. This is because the representation
+capacity of Euclidean methods decreases rapidly with increasing                                                        • w/o HDGC: HGWaveNet without the hyperbolic diffusion
+graph scales, while hyperbolic models remain stable by virtue of                                                         graph convolution, implemented by replacing HDGC with
+the fitness between data distributions and space properties.                                                             shallow HGCN to learn from spatial characteristics.
+                                                                                                                       • w/o HDCC: HGWaveNet without the hyperbolic dilated
+                                                                                                                         causal convolution, implemented by replacing HDCC with
+8 The code is open sourced in https://github.com/TaiLvYuanLiang/HGWaveNet.                                               an attention mechanism to achieve historical hidden states.
+WWW ’23, April 30-May 4, 2023, Austin, TX, USA                                                                            Qijie Bai, Changli Nie, Haiwei Zhang, Dongming Zhao and Xiaojie Yuan
+
+
+                                                                                                                                                              H G W a v e N e t                            G R U G C N
+      • w/o B: HGWaveNet without hyperbolic geometry, imple-                                                                              F B                                                                                    M o v ie L e n s
+
+        mented by replacing all modules with corresponding Eu-                                9 0                                                                                                    9 0
+        clidean versions.
+                                                                                              8 0                                                                                                    8 0
+
+
+
+
+                                                                                                                                                                                  A U C S c o re
+                                                                             A U C S c o re
+   We take the same experimental setup with HGWaveNet and
+baselines on these three variants, and the results are reported in the                        7 0                                                                                                    7 0
+
+last rows of Table 3 and Table 4. The performance drops noticeably                            6 0                                                                                                    6 0
+after removing any of these three components, which indicates
+their respective importance. In the following, we discuss the details                         5 0
+                                                                                                                1 6             8                     4                   2
+                                                                                                                                                                                                     5 0
+                                                                                                                                                                                                           1 6               8                      4       2
+                                                                                                                                    D im e n s io n                                                                              D im e n s io n
+of the effectiveness of these variants.
+   HDGC module imposes the diffusion process into hyperbolic
+                                                                         Figure 6: The influence of representation dimension on two
+graph convolution networks. It allows nodes to aggregate informa-
+                                                                         datasets FB and MovieLens for HGWaveNet and GRUGCN.
+tion from a wider range of neighbors and improves the efficiency of
+message propagation by calculating the stationary distribution of a
+long Markov process in a closed form. The fact that performance of                                        9 2                                                                                        9 2
+
+w/o HDGC variant has a larger degradation on large graphs than                                                                                                                                       8 8
+small ones forcefully proves the effectiveness of this component
+
+
+
+
+                                                                                         A U C S c o re
+
+
+
+
+                                                                                                                                                                                    A U C S c o re
+                                                                                                          8 8
+
+for large graphs with long paths.                                                                                                                                                                    8 4
+
+   The purpose of HDCC module is to capture the internal order                                            8 4
+                                                                                                                                                                                                     8 0
+of causal correlation in sequential data. Generally, the larger a
+                                                                                                          8 0                                                                                        7 6
+graph is, the more complex its evolution is and the richer historical                                                 1             2                     3           4                                     1            2                     3        4
+                                                                                                                                                K                                                                                      D
+information it has. The experimental results on w/o HDCC show
+the powerful ability of this component to capture causal order in        Figure 7: The influence of truncated diffusion step 𝐾 (left)
+temporal evolution process, especially on complex graphs (i.e. FB        and dilated depth 𝐷 (right) on MovieLens.
+and MovieLens).
+   As observed in Table 3 and Table 4, the degradation of w/o B
+is much more severe than that of the other two variants, which           causal convolution. However, as the receptive field expands, more
+strongly supports our primary idea that hyperbolic geometry fits         noise is imported and may degrade the model performance. Accord-
+the power-law distributions of real-world graphs very well. More-        ing to our extensive experiments, 𝐷 = 3 is a nice choice in most
+over, it is noteworthy that for most results, the variant w/o B ex-      situations, with the causal convolution kernel size being 2.
+hibits a comparable or even exceeding performance to other Eu-
+clidean baselines. This proves that our model architecture still keeps   6                                CONCLUSION
+advanced even without the advantages of hyperbolic geometry.             In this paper, we propose a hyperbolic graph neural network HG-
+                                                                         WaveNet for temporal link prediction. Inspired by the observed
+5.4     Parameter Analysis                                               power-law distribution and implicit hierarchical structure of real-
+We further study the influences of three hyper-parameters: repre-        world graphs, we construct our model on the Poincaré ball, one of
+sentation dimension, truncated diffusion step and dilated depth.         the isometric models of hyperbolic spaces. Specifically, we design
+   We evaluate the performance of HGWaveNet and one of the best          two novel modules hyperbolic diffusion graph convolution (HDGC)
+Euclidean models GRUGCN on two datasets FB (relatively sparse)           and hyperbolic dilated causal convolution (HDCC) to extract the
+and MovieLens (relatively dense) by setting the representation           spatial topological information and temporal evolutionary states,
+dimension into different values, as shown in Figure 6. On the one        respectively. HDGC imposes the diffusion process into graph convo-
+hand, it is clear that with the dimension decreasing, our model          lution and provides an efficient way to aggregate information from
+remains stable compared to GRUGCN, to which the hyperbolic               a wider range of neighbors. HDCC ensures that the internal order of
+geometry contributes greatly. On the other hand, for HGWaveNet,          causal correlations is not violated by applying the convolution filter
+the degradation of the performance on MovieLens is severer than          only to previous data. Extensive experiments on diverse real-world
+that on FB, which is consistent with the conclusion in [55] that         datasets prove the superiority of HGWaveNet, and the ablation
+hyperbolic models fit sparse data better than dense data.                study further verifies the effectiveness of each component of our
+   Figure 7 shows the results of our model for temporal link predic-     model. In future work, we will further generalize our model for
+tion on MovieLens with different values of truncated diffusion step      more downstream tasks and try to use hyperbolic GNNs to capture
+𝐾 in HDGC and dilated depth 𝐷 in HDCC. The wrap-up observa-              more complex semantic information in heterogeneous graphs.
+tion that the performance generally increases as 𝐾 and 𝐷 increase
+proves the positive influences of diffusion process and dilation         ACKNOWLEDGMENTS
+convolution. Specifically, in terms of truncated diffusion step, the     This work is supported by the Chinese Scientific and Technical
+performance has a great improvement from 𝐾 = 1 to 𝐾 = 2. When            Innovation Project 2030 (2018AAA0102100), National Natural Sci-
+𝐾 > 2, the benefit from increasing 𝐾 becomes too small to match          ence Foundation of China (U1936206, 62172237) and the Tian-
+the surge of computation from exponentially expanding neighbors          jin Natural Science Foundation for Distinguished Young Scholars
+in graphs. Dilated depth 𝐷 is used to control the receptive field of     (22JCJQJC00150).
+HGWaveNet: A Hyperbolic Graph Neural Network for Temporal Link Prediction                                                      WWW ’23, April 30-May 4, 2023, Austin, TX, USA
+
+
+REFERENCES                                                                                  [27] Maximillian Nickel and Douwe Kiela. 2018. Learning continuous hierarchies in
+ [1] Austin R Benson, Rediet Abebe, Michael T Schaub, Ali Jadbabaie, and Jon Klein-              the lorentz model of hyperbolic geometry. In International Conference on Machine
+     berg. 2018. Simplicial closure and higher-order link prediction. Proceedings of             Learning. PMLR, 3779–3788.
+     the National Academy of Sciences 115, 48 (2018), E11221–E11230.                        [28] Aldo Pareja, Giacomo Domeniconi, Jie Chen, Tengfei Ma, Toyotaro Suzumura,
+ [2] Ranran Bian, Yun Sing Koh, Gillian Dobbie, and Anna Divoli. 2019. Network                   Hiroki Kanezashi, Tim Kaler, Tao Schardl, and Charles Leiserson. 2020. Evolvegcn:
+     embedding and change modeling in dynamic heterogeneous networks. In Proceed-                Evolving graph convolutional networks for dynamic graphs. In Proceedings of
+     ings of the 42nd International ACM SIGIR Conference on Research and Development             the AAAI Conference on Artificial Intelligence, Vol. 34. 5363–5370.
+     in Information Retrieval. 861–864.                                                     [29] Wei Peng, Tuomas Varanka, Abdelrahman Mostafa, Henglin Shi, and Guoying
+ [3] Michael M Bronstein, Joan Bruna, Yann LeCun, Arthur Szlam, and Pierre Van-                  Zhao. 2021. Hyperbolic Deep Neural Networks: A Survey. IEEE Transactions on
+     dergheynst. 2017. Geometric deep learning: going beyond euclidean data. IEEE                Pattern Analysis and Machine Intelligence (2021).
+     Signal Processing Magazine 34, 4 (2017), 18–42.                                        [30] Liang Qu, Huaisheng Zhu, Qiqi Duan, and Yuhui Shi. 2020. Continuous-time
+ [4] Ines Chami, Zhitao Ying, Christopher Ré, and Jure Leskovec. 2019. Hyperbolic                link prediction via temporal dependent graph neural network. In Proceedings of
+     graph convolutional neural networks. Advances in neural information processing              The Web Conference 2020. 3026–3032.
+     systems 32 (2019).                                                                     [31] Emanuele Rossi, Ben Chamberlain, Fabrizio Frasca, Davide Eynard, Federico
+ [5] Jinyin Chen, Jian Zhang, Xuanheng Xu, Chenbo Fu, Dan Zhang, Qingpeng Zhang,                 Monti, and Michael Bronstein. 2020. Temporal Graph Networks for Deep Learning
+     and Qi Xuan. 2019. E-lstm-d: A deep learning framework for dynamic network                  on Dynamic Graphs. In ICML 2020 Workshop on Graph Representation Learning.
+     link prediction. IEEE Transactions on Systems, Man, and Cybernetics: Systems 51,       [32] Ryan Rossi and Nesreen Ahmed. 2015. The network data repository with in-
+     6 (2019), 3699–3712.                                                                        teractive graph analytics and visualization. In Twenty-ninth AAAI conference on
+ [6] Kyunghyun Cho, Bart van Merrienboer, Çaglar Gülçehre, Dzmitry Bahdanau,                     artificial intelligence.
+     Fethi Bougares, Holger Schwenk, and Yoshua Bengio. 2014. Learning Phrase               [33] Frederic Sala, Chris De Sa, Albert Gu, and Christopher Ré. 2018. Representation
+     Representations using RNN Encoder-Decoder for Statistical Machine Translation.              tradeoffs for hyperbolic embeddings. In International conference on machine
+     In EMNLP.                                                                                   learning. PMLR, 4460–4469.
+ [7] da Xu, chuanwei ruan, evren korpeoglu, sushant kumar, and kannan achan. 2020.          [34] Aravind Sankar, Yanhong Wu, Liang Gou, Wei Zhang, and Hao Yang. 2020.
+     Inductive representation learning on temporal graphs. In International Conference           Dysat: Deep neural representation learning on dynamic graphs via self-attention
+     on Learning Representations. https://openreview.net/forum?id=rJeW1yHYwH                     networks. In Proceedings of the 13th international conference on web search and
+ [8] Jindou Dai, Yuwei Wu, Zhi Gao, and Yunde Jia. 2021. A hyperbolic-to-hyperbolic              data mining. 519–527.
+     graph convolutional network. In Proceedings of the IEEE/CVF Conference on Com-         [35] Ramit Sawhney, Shivam Agarwal, Arnav Wadhwa, and Rajiv Shah. 2021. Ex-
+     puter Vision and Pattern Recognition. 154–163.                                              ploring the scale-free nature of stock markets: Hyperbolic graph learning for
+ [9] Octavian Ganea, Gary Bécigneul, and Thomas Hofmann. 2018. Hyperbolic neural                 algorithmic trading. In Proceedings of the Web Conference 2021. 11–22.
+     networks. Advances in neural information processing systems 31 (2018).                 [36] Youngjoo Seo, Michaël Defferrard, Pierre Vandergheynst, and Xavier Bresson.
+[10] M GROMOV. 1987. Hyperbolic groups, Essays in group theory. MSRI Publ. 8                     2018. Structured sequence modeling with graph convolutional recurrent net-
+     (1987), 75–264.                                                                             works. In International conference on neural information processing. Springer,
+[11] Ehsan Hajiramezanali, Arman Hasanzadeh, Krishna Narayanan, Nick Duffield,                   362–373.
+     Mingyuan Zhou, and Xiaoning Qian. 2019. Variational graph recurrent neural             [37] Jianing Sun, Zhaoyue Cheng, Saba Zuberi, Felipe Pérez, and Maksims Volkovs.
+     networks. Advances in neural information processing systems 32 (2019).                      2021. Hgcf: Hyperbolic graph convolution networks for collaborative filtering.
+[12] Will Hamilton, Zhitao Ying, and Jure Leskovec. 2017. Inductive representation               In Proceedings of the Web Conference 2021. 593–601.
+     learning on large graphs. Advances in neural information processing systems 30         [38] Li Sun, Zhongbao Zhang, Jiawei Zhang, Feiyang Wang, Hao Peng, Sen Su, and
+     (2017).                                                                                     S Yu Philip. 2021. Hyperbolic variational graph neural network for modeling
+[13] F Maxwell Harper and Joseph A Konstan. 2015. The movielens datasets: History                dynamic graphs. In Proceedings of the AAAI Conference on Artificial Intelligence,
+     and context. Acm transactions on interactive intelligent systems (tiis) 5, 4 (2015),        Vol. 35. 4375–4383.
+     1–19.                                                                                  [39] Shang-Hua Teng et al. 2016. Scalable algorithms for data and network analysis.
+[14] Petter Holme and Jari Saramäki. 2012. Temporal networks. Physics reports 519, 3             Foundations and Trends® in Theoretical Computer Science 12, 1–2 (2016), 1–274.
+     (2012), 97–125.                                                                        [40] Rakshit Trivedi, Mehrdad Farajtabar, Prasenjeet Biswal, and Hongyuan Zha. 2019.
+[15] Hong Huang, Ruize Shi, Wei Zhou, Xiao Wang, Hai Jin, and Xiaoming Fu. 2021.                 Dyrep: Learning representations over dynamic graphs. In International conference
+     Temporal Heterogeneous Information Network Embedding.. In IJCAI. 1470–1476.                 on learning representations.
+[16] Houye Ji, Junxiong Zhu, Xiao Wang, Chuan Shi, Bai Wang, Xiaoye Tan, Yanghua            [41] Aäron van den Oord, Sander Dieleman, Heiga Zen, Karen Simonyan, Oriol
+     Li, and Shaojian He. 2021. Who you would like to share with? a study of share               Vinyals, Alex Graves, Nal Kalchbrenner, Andrew W. Senior, and Koray
+     recommendation in social e-commerce. In Proceedings of the AAAI Conference on               Kavukcuoglu. 2016. WaveNet: A Generative Model for Raw Audio. In The 9th
+     Artificial Intelligence, Vol. 35. 232–239.                                                  ISCA Speech Synthesis Workshop, Sunnyvale, CA, USA, 13-15 September 2016. ISCA,
+[17] David Kempe, Jon Kleinberg, and Amit Kumar. 2000. Connectivity and inference                125.
+     problems for temporal networks. In Proceedings of the thirty-second annual ACM         [42] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones,
+     symposium on Theory of computing. 504–513.                                                  Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all
+[18] Shima Khoshraftar and Aijun An. 2022. A Survey on Graph Representation                      you need. Advances in neural information processing systems 30 (2017).
+     Learning Methods. arXiv preprint arXiv:2204.01855 (2022).                              [43] Petar Veličković, Guillem Cucurull, Arantxa Casanova, Adriana Romero, Pietro
+[19] Dmitri Krioukov, Fragkiskos Papadopoulos, Maksim Kitsak, Amin Vahdat, and                   Liò, and Yoshua Bengio. 2018. Graph Attention Networks. In International Con-
+     Marián Boguná. 2010. Hyperbolic geometry of complex networks. Physical                      ference on Learning Representations.
+     Review E 82, 3 (2010), 036106.                                                         [44] Xiao Wang, Yiding Zhang, and Chuan Shi. 2019. Hyperbolic heterogeneous in-
+[20] Jure Leskovec, Jon Kleinberg, and Christos Faloutsos. 2005. Graphs over time:               formation network embedding. In Proceedings of the AAAI conference on artificial
+     densification laws, shrinking diameters and possible explanations. In Proceedings           intelligence, Vol. 33. 5337–5344.
+     of the eleventh ACM SIGKDD international conference on Knowledge discovery in          [45] Yiwei Wang, Yujun Cai, Yuxuan Liang, Henghui Ding, Changhu Wang, and Bryan
+     data mining. 177–187.                                                                       Hooi. 2021. Time-Aware Neighbor Sampling for Temporal Graph Networks. arXiv
+[21] Yaguang Li, Rose Yu, Cyrus Shahabi, and Yan Liu. 2018. Diffusion Convolutional              preprint arXiv:2112.09845 (2021).
+     Recurrent Neural Network: Data-Driven Traffic Forecasting. In International            [46] Max Welling and Thomas N Kipf. 2016. Semi-supervised classification with graph
+     Conference on Learning Representations.                                                     convolutional networks. In J. International Conference on Learning Representations
+[22] Qi Liu, Maximilian Nickel, and Douwe Kiela. 2019. Hyperbolic graph neural                   (ICLR 2017).
+     networks. Advances in Neural Information Processing Systems 32 (2019).                 [47] Xian Wu, Baoxu Shi, Yuxiao Dong, Chao Huang, and Nitesh V Chawla. 2019.
+[23] Sedigheh Mahdavi, Shima Khoshraftar, and Aijun An. 2018. dynnode2vec: Scal-                 Neural tensor factorization for temporal interaction learning. In Proceedings of
+     able dynamic network embedding. In 2018 IEEE international conference on big                the Twelfth ACM international conference on web search and data mining. 537–545.
+     data (Big Data). IEEE, 3762–3765.                                                      [48] Z Wu, S Pan, G Long, J Jiang, and C Zhang. 2019. Graph WaveNet for Deep
+[24] Naoki Masuda and Renaud Lambiotte. 2016. A guide to temporal networks. World                Spatial-Temporal Graph Modeling. In The 28th International Joint Conference
+     Scientific.                                                                                 on Artificial Intelligence (IJCAI). International Joint Conferences on Artificial
+[25] Giang Hoang Nguyen, John Boaz Lee, Ryan A Rossi, Nesreen K Ahmed, Eunyee                    Intelligence Organization.
+     Koh, and Sungchul Kim. 2018. Continuous-time dynamic network embeddings.               [49] Cheng Yang, Chunchen Wang, Yuanfu Lu, Xumeng Gong, Chuan Shi, Wei Wang,
+     In Companion proceedings of the the web conference 2018. 969–976.                           and Xu Zhang. 2022. Few-shot Link Prediction in Dynamic Networks. In Pro-
+[26] Maximillian Nickel and Douwe Kiela. 2017. Poincaré embeddings for learning                  ceedings of the Fifteenth ACM International Conference on Web Search and Data
+     hierarchical representations. Advances in neural information processing systems             Mining. 1245–1255.
+     30 (2017).                                                                             [50] Carl Yang, Jieyu Zhang, Haonan Wang, Sha Li, Myungwan Kim, Matt Walker,
+                                                                                                 Yiou Xiao, and Jiawei Han. 2020. Relation learning on social networks with
+WWW ’23, April 30-May 4, 2023, Austin, TX, USA                                                      Qijie Bai, Changli Nie, Haiwei Zhang, Dongming Zhao and Xiaojie Yuan
+
+
+     multi-modal graph edge variational autoencoders. In Proceedings of the 13th         size 𝑆 = 2, the layer number for gated HDCC is valued as 4, and the
+     International Conference on Web Search and Data Mining. 699–707.                    hyper-parameters 𝑟, 𝑠 in Fermi-Dirac decoder are taken to be 2 and
+[51] Menglin Yang, Zhihao Li, Min Zhou, Jiahong Liu, and Irwin King. 2022. HICF:
+     Hyperbolic Informative Collaborative Filtering. In Proceedings of the 28th ACM      1 separately. All involved curvatures are initialized as 1 and keep
+     SIGKDD Conference on Knowledge Discovery and Data Mining. 2212–2221.                trainable during the training process. For fairness, the representa-
+[52] Menglin Yang, Min Zhou, Marcus Kalander, Zengfeng Huang, and Irwin King.
+     2021. Discrete-time temporal network embedding via implicit hierarchical learn-
+                                                                                         tion dimension is set to 16 for all methods. All experiments are run
+     ing in hyperbolic space. In Proceedings of the 27th ACM SIGKDD Conference on        on a machine with 2 × Intel Xeon Gold 6226R 16C 2.90 GHz CPUs,
+     Knowledge Discovery & Data Mining. 1975–1985.                                       4 × GeForce RTX 3090 GPUs.
+[53] Menglin Yang, Min Zhou, Jiahong Liu, Defu Lian, and Irwin King. 2022. HRCF:
+     Enhancing collaborative filtering via hyperbolic geometric regularization. In
+     Proceedings of the ACM Web Conference 2022. 2462–2471.                              A.3       Supplementary Experiments
+[54] Aya Zaki, Mahmoud Attia, Doaa Hegazy, and Safaa Amin. 2016. Comprehensive
+     survey on dynamic graph models. International Journal of Advanced Computer          In Table 6, 7 and 8, we give out the supplementary experimental
+     Science and Applications 7, 2 (2016).                                               results for parameter analysis in Section 5.4. All these experiments
+[55] Sixiao Zhang, Hongxu Chen, Xiao Ming, Lizhen Cui, Hongzhi Yin, and Guandong         are evaluated by AUC score on temporal link prediction task.
+     Xu. 2021. Where are we in embedding spaces?. In Proceedings of the 27th ACM
+     SIGKDD Conference on Knowledge Discovery & Data Mining. 2223–2231.
+[56] Yiding Zhang, Xiao Wang, Chuan Shi, Xunqiang Jiang, and Yanfang Fanny Ye.
+     2021. Hyperbolic graph attention network. IEEE Transactions on Big Data (2021).
+                                                                                             Table 6: The influence of representation dimension.
+[57] Yiding Zhang, Xiao Wang, Chuan Shi, Nian Liu, and Guojie Song. 2021. Lorentzian           Dimension     Enron     DBLP    AS733            FB      HepPh      MovieLens
+     graph convolutional networks. In Proceedings of the Web Conference 2021. 1249–
+                                                                                                   16        96.86     89.96      98.78        89.51      92.37      91.90
+     1261.
+                                                                                                   8         96.56     89.49      98.67        88.74      90.20      88.44
+[58] Ling Zhao, Yujiao Song, Chao Zhang, Yu Liu, Pu Wang, Tao Lin, Min Deng, and
+                                                                                                   4         96.64     89.24      98.36        88.51      88.76      87.90
+     Haifeng Li. 2019. T-gcn: A temporal graph convolutional network for traffic
+                                                                                                   2         96.41     88.84      97.95        87.87      88.42      86.55
+     prediction. IEEE Transactions on Intelligent Transportation Systems 21, 9 (2019),
+     3848–3858.
+[59] Lekui Zhou, Yang Yang, Xiang Ren, Fei Wu, and Yueting Zhuang. 2018. Dynamic
+     network embedding by modeling triadic closure process. In Proceedings of the
+     AAAI conference on artificial intelligence, Vol. 32.                                    Table 7: The influence of truncated diffusion step 𝐾.
+[60] Yuan Zuo, Guannan Liu, Hao Lin, Jia Guo, Xiaoqian Hu, and Junjie Wu. 2018.
+     Embedding temporal network via neighborhood formation. In Proceedings of the              𝐾    Enron     DBLP       AS733            FB         HepPh        MovieLens
+     24th ACM SIGKDD international conference on knowledge discovery & data mining.
+     2857–2866.                                                                                1    94.95      89.51      97.97       85.99            90.61        84.35
+                                                                                               2    96.86      89.96      98.78       89.51            92.37        91.90
+                                                                                               3    96.88      89.62      98.95       90.28            92.72        92.36
+A APPENDIX                                                                                     4    96.86      89.67      98.94       90.39            92.81        92.42
+A.1 Notations
+Part of notations in our paper are summarized in Table 5.
+                                                                                                     Table 8: The influence of dilated depth 𝐷.
+                             Table 5: Notations.
+                                                                                               𝐷    Enron     DBLP       AS733            FB         HepPh        MovieLens
+      Symbols                            Descriptions
+                                                                                               1     91.14     88.67      94.98       73.69            87.38        80.44
+          G        Discrete dynamic graph represented by snapshots.                            2     92.16     89.89      97.12       83.18            90.41        87.52
+         G𝑡        Snapshot of G at timestamp 𝑡.                                               3     96.86     89.96      98.78       89.51            92.37        91.90
+         H𝑐𝑛       𝑛-dimensional hyperbolic manifold with curvature −𝑐.                        4     97.17     89.62      98.93       89.99            93.17        91.47
+        𝑔𝑐,H       Riemannian metric corresponding to the manifold H.
+        Tx H𝑐𝑛     Tangent space of H𝑐𝑛 at point x.
+         B𝑐𝑛       Poincaré ball manifold corresponding to H𝑐𝑛 .
+          𝑑        Dimension of node representations.
+          𝐾        Truncated diffusion steps in HDGC.
+          𝐿        Layer number of HDGC.
+          𝑆        Convolution kernel size of HDCC.
+          𝐷        Dilated depth of HDCC.
+         𝐷′        Layer number of gated HDCC module.
+          A        Bi-direct adjacent matrix of a static graph or snapshot.
+        X𝑙𝑡,𝑘      𝑘-th step of HDGC at layer 𝑙, timestamp 𝑡.
+         H𝑡        Temporal information earlier than timestamp 𝑡.
+          F        Kernel metrix of HDCC.
+         Z𝑡        Node representations at timestamp 𝑡.
+         𝑡
+        LHTC       Hyperbolic temporal consistency at timestamp 𝑡.
+        LCE𝑡       Cross-entropy like loss at timestamp 𝑡.
+        W, b       Trainable parameters.
+
+
+A.2      Experimental Details
+For all baselines, we take the recommended parameter settings
+unless otherwise noted. For our proposed HGWaveNet, the param-
+eters are set as follows: the truncated diffusion step 𝐾 = 2, the layer
+number of HDGC 𝐿 = 2, the dilation depth for HDCC 𝐷 = 3, kernel
+

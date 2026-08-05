@@ -1,0 +1,505 @@
+                                                                                                                                                                               2022 IEEE International Conference on Data Mining (ICDM)
+
+
+
+
+                                                                                                                                          THINK: Temporal Hypergraph Hyperbolic Network
+                                                                                                                                                       Shivam Agarwal*p , Ramit Sawhney* , Megh Thakkar‡ , Preslav Nakov† , Jiawei Hanp , Tyler Derrm
+                                                                                                                                                                p
+                                                                                                                                                          University of Illinois at Urbana-Champaign,  Georgia Institute of Technology, ‡ BITS Pilani
+                                                                                                                                                              †
+                                                                                                                                                                Mohamed bin Zayed University of Artiﬁcial Intelligence, m Vanderbilt University
+2022 IEEE International Conference on Data Mining (ICDM) | 978-1-6654-5099-7/22/$31.00 ©2022 IEEE | DOI: 10.1109/ICDM54844.2022.00096
+
+
+
+
+                                                                                                                                            {shivama2,hanj}@illinois.edu, ramit.sawhney@scheller.gatech.edu, preslav.nakov@mbzuai.ac.ae, tyler.derr@vanderbilt.edu
+
+
+
+                                                                                                                                           Abstract—Network-based time series forecasting is a challeng-                     At the same time, typical characteristics of scale-free net-
+                                                                                                                                        ing task as it involves complex geometric properties, higher-                     works such as long-tail node degree distributions and the
+                                                                                                                                        order relations, and scale-free characteristics. Previous work has                presence of inﬂuential hubs are handled well in the hyper-
+                                                                                                                                        modeled network-based series as oversimpliﬁed graphs or has                       bolic space [14]. However, existing hyperbolic graph neural
+                                                                                                                                        ignored the power law dynamics of real-world temporal and                         networks [15] do not generalize to higher-order connections
+                                                                                                                                        dynamic networks, which could yield suboptimal results. With
+                                                                                                                                        the aim to address these issues, here we propose THINK, a                         in hypergraphs.
+                                                                                                                                        novel framework based on hypergraph learning that captures                           With this in mind, here we leverage the hyperbolic space
+                                                                                                                                        the hyperbolic properties of time-evolving dynamic hypergraphs.                   to encode scale-free temporal and time-evolving dynamic
+                                                                                                                                        We design an elegant hyperbolic distance-aware hypergraph                         hypergraphs. In particular, we formulate the δhg hyperbolic-
+                                                                                                                                        attention mechanism to better capture informative internal
+                                                                                                                                                                                                                          ity for hypergraphs (§II) based on the shortest path algo-
+                                                                                                                                        structural features on the Poincaré ball. Through quantitative
+                                                                                                                                        and conceptual analysis on seven tasks across temporal, and                       rithms in hypergraphs and we build elegant distance-aware
+                                                                                                                                        time-evolving dynamic hypergraphs, we demonstrate THINK’s                         hyperbolic hypergraph aggregation operations (§III-B) that
+                                                                                                                                        practicality in comparison to a variety of benchmarks spanning                    use hyperbolic distance to preserve the information during
+                                                                                                                                        ﬁnance, health, and energy networks.                                              message propagation. We present a novel hyperbolic learning
+                                                                                                                                           Index Terms—hyperbolic, hypergraphs, spatio-temporal fore-                     framework which we call Temporal Hypergraph Hyperbolic
+                                                                                                                                        casting.
+                                                                                                                                                                                                                          Network (THINK), which uses hyperbolic hypergraph and
+                                                                                                                                                                                                                          temporal operations (§III-C) to encode temporal, and time-
+                                                                                                                                                                    I. I NTRODUCTION                                      evolving dynamic networks.
+                                                                                                                                           Network time-series forecasting is a critical problem with                        Our contributions can be summarized as:
+                                                                                                                                        several applications, e.g., for ﬁnancial predictions, for trafﬁc                   • We formulate δhg hyperbolicity for hypergraphs, and we
+                                                                                                                                        prediction, and for forecasting the trends of rare diseases [1]–                      propose DHHAN, a Distance-aware Hyperbolic Hypergraph
+                                                                                                                                        [3]. Making accurate predictions about the future is a chal-                          Attention Network, to capture higher-order scale-free cor-
+                                                                                                                                        lenging task, as both inter-series and intra-series dependencies                      relations in the hyperbolic space.
+                                                                                                                                        need to be modeled simultaneously [4]. Recent work [5],                            • We devise THINK , which combines hyperbolic temporal
+                                                                                                                                        [6] leveraged graph neural networks (GNNs) to model the                               convolutions with DHHAN in order to capture hyperbolic
+                                                                                                                                        inter-series relationships as a graph since GNNs can capture                          properties in the network and in the temporal domains.
+                                                                                                                                        the symmetries in graph data [7]. However, most real-world                         • We show that THINK outperforms several state-of-the-art
+                                                                                                                                        networks innately comprise higher-order relations that go                             methods across seven tasks deﬁned on spatio-temporal
+                                                                                                                                        beyond pairwise connections [2], [8]. One way to model such                           and dynamic networks. We further demonstrate THINK’s
+                                                                                                                                        higher-order relations is to use hypergraph generalizations of                        practicality on ﬁnancial, health, and energy applications.
+                                                                                                                                        graphs [9], where a hyperedge can connect multiple nodes and
+                                                                                                                                                                                                                          II. H YPERGRAPH HYPERBOLICITY & H YPERBOLIC S PACES
+                                                                                                                                        thus can naturally express higher-order relations such as group
+                                                                                                                                        behavior between multiple nodes [10].                                                The δhg Hyperbolicity is a score that provides a degree
+                                                                                                                                           In addition to higher-order correlations, several real-world                   of similarity of the hypergraph to the hyperbolic space. For
+                                                                                                                                        temporal networks such as blockchain transaction networks,                        a hypergraph G, the δhg hyperbolicity can be computed using
+                                                                                                                                        and stock networks exhibit a scale-free or a hierarchical                         the Gromov product [16], which is deﬁned as follows for a
+                                                                                                                                        structure [11], where a small change in a single network entity                   triple of nodes x, y, and z:
+                                                                                                                                        may cause a series of chain reactions leading to a “domino                                                1
+                                                                                                                                        effect.” For example, changes in crude oil prices can lead to                                 (y, z)x =     (d(x, y) + d(x, z) − d(y, z))                (1)
+                                                                                                                                                                                                                                                  2
+                                                                                                                                        contagious effects on several groups of stocks across industries
+                                                                                                                                        such as transportation, energy, utilities, etc. [12]. However,                    where the distance d(x, y) is the shortest s-walk, called the
+                                                                                                                                        conventional (hyper)graph models are deﬁned in the Euclidean                      s-distance between nodes x and y [17]. The s-walk is a higher-
+                                                                                                                                        space, and thus suffer from large distortions when representing                   order walk in the hypergraph, where s controls the “width” in
+                                                                                                                                        such networks [13].                                                               terms of edge overlap size. The s-walk between nodes x and y
+                                                                                                                                                                                                                          is a sequence of nodes that pairwise share at least s hyperedges
+                                                                                                                                          *Equal Contribution                                                             (we provide the algorithm for s-distance in the Appendix).
+
+
+                                                                                                                                        978-1-6654-5099-7/22/$31.00 ©2022 IEEE                                      849
+                                                                                                                                        DOI 10.1109/ICDM54844.2022.00096
+
+                                                                                                                                          Authorized licensed use limited to: Vanderbilt University Libraries. Downloaded on February 06,2023 at 09:24:52 UTC from IEEE Xplore. Restrictions apply.
+                                                                                                                                 
+TABLE I: Basic dataset statistics including δhg and δrel hy-                                              ||xy||                    ||xy||
+perbolicities of (i) spatio-temporal networks such as Chicken                               x  y = tan          arctan−1 (||y||)                       (7)
+                                                                                                            y                        ||y||
+Pox spread (CPox), windmill energy (WMill), and stock                                                W ⊗ x = expo (W logo (x))                          (8)
+networks of NYSE, NASDAQ, CSE, and TSE exchanges, and
+(ii) dynamic networks such as Twitter tennis mentions (DTT).                       Poincaré Fully Connected Layer (F c (·)). Given the inputs
+         Dataset        # Timesteps    # Nodes     δhg    δrel                                                               m
+                                                                                   x ∈ B n with parameters Z = {zk ∈ To B n }k=1 and bias terms
+                                                                                                m
+         DTT [18]               120       1,000     1.0        -                   r = {rk ∈ R}k=1 , we follow [25] to deﬁne (F c (·)) as follows:
+         CPox [19]              522          20     1.5    0.190
+         WMill [20]          17,472         319     1.0    0.025                                        
+         NYSE [1]             1,245       1,737     0.5    0.087                      F c (x) = w(1 +       1 + ||w||2 )−1 , w = (sinh(vk (x)))m
+                                                                                                                                               k=1      (9)
+         TSE [21]             1,159          95     1.5    0.074
+         NASDQ [2]            1,245       1,026     1.0    0.107
+         CSE [22]             1,293          85     1.5    0.176
+                                                                                   where vk (x) is the generalized linear transform deﬁned as
+
+   We now deﬁne δhg as the minimal value greater than zero                          vk (x) = 2||zk ||sinh−1(λx x, zk cosh(2rk )−(λx−1)sinh(2rk )) (10)
+for which the following holds for any nodes x, y, z, and w:
+                                                                                   Poincaré β-concatenation (β-cat(·)) is used to join M inputs
+             (x, z)w ≥ min((x, y)w , (y, z)w ) − δhg                   (2)         {xi ∈ B ni }M      into a vector y = β-cat({xi }M  i=1 ) ∈ B ,
+                                                                                                                                                n
+                                                                                                   M
+                                                                                                 i=1
+In addition to δhg , we also compute the relative dataset-level                    where n =         i ni . Following [25], the inputs are ﬁrst
+δrel hyperbolicity using the Euclidean distance between tempo-                     scaled using coefﬁcients βn = B( n2 , 12 ), where B denotes the
+ral node features [23] (formally deﬁned in the Appendix). Low                      beta distribution. These features are then concatenated in the
+values of δhg and δrel hyperbolicity indicate that the space has                   tangent space as follows:
+an underlying hyperbolic geometry, i.e., an approximate tree-
+                                                                                                  −1                           −1
+like structure, and that the hyperbolic space would be well-                        y = expo (βn βn1 logo (x1 ) , . . . , βn βnM logo (xM ) ) (11)
+suited to embed it [24]. Table I shows the hyperbolicity of
+various temporal and dynamic hypergraphs: we can see that                                           III. M ETHODOLOGY: THINK
+the degree of hyperbolicity in these networks is generally high,
+i.e., low δhg , δrel , suggesting that scale-free hypergraphs can                    Fig. 1 shows an overview of THINK. In the following sub-
+beneﬁt from representations in the hyperbolic space.                               sections, we explain how we extract temporal features using
+   The hyperbolic space is a non-Euclidean geometry with                           hyperbolic temporal convolutions (§III-A). We then describe
+constant negative curvature. We implement the Poincaré ball                       how we aggregate node features via distance-aware hyperbolic
+model of the hyperbolic space. This model is deﬁned as                             hypergraph aggregation (§III-B) followed by detailing how
+(B, gxB ), where the manifold B = {x ∈ Rn : ||x|| < 1}                             hyperbolic temporal and spatial components are combined to
+is endowed with the Riemannian metric gxB = λ2x g E , where                        capture the temporal evolution of hypergraphs (§III-C).
+                                    2
+the conformal factor λx = 1−||x||      2 and g
+                                                E
+                                                  = diag[1, . . . , 1]
+is the Euclidean metric tensor. We denote the tangent space                        A. Hyperbolic Temporal Convolution
+(Euclidean) centered at point x as Tx B. Since hyperbolic
+spaces are non-Euclidean, we leverage the formulations of                             The temporal dependencies of several common hypergraphs
+Möbius gyrovector spaces, which allow us to generalize stan-                      such as stock networks often show power-law distribution
+dard operations to hyperbolic geometry [15].                                       [26], which indicates the possible presence of hierarchical
+Möbius Addition & Hyperbolic Distance. Following [15],                            relations in time-series data. Thus, we implement a temporal
+the Möbius addition ⊕ and the hyperbolic distance dB (x, y)                       convolution in the hyperbolic space τ -conv(·) [25]. In contrast
+for points x, y ∈ B is given as follows:                                           to the Euclidean space, the Poincaré ball model reﬂects the
+                                                                                   power law distribution with its radius [15], thus enabling it to
+                (1 + 2x, y + ||y||2 )x + (1 − ||x||2 )y
+      x⊕y =                                                            (3)         better represent the hierarchical relations in a time-series data.
+                        1 + 2x, y + ||x||2 ||y||2
+                                                                                      Given Euclidean temporal input node features XE , we ﬁrst
+               dB (x, y) = 2tanh−1 (|| − x ⊕ y||)                      (4)         project them to hyperbolic features X l via the exponential
+where, ., . and || · || denote the inner product and the norm,                   mapping as X l = expo (XE ). Let K denote the kernel size
+respectively. We now deﬁne the mapping functions to project                        of the hyperbolic temporal convolution with input features
+Euclidean vectors to the hyperbolic space, and vice versa.                         X l ∈ B N ×nK×C corresponding to N nodes for a historical
+Exponential & Logarithmic Map. For point x ∈ B, the                                lookback period τ = nK to the lth layer. Here, C is the
+exponential map expx : TxB → B and the logarithmic map                             number of features per node. We concatenate the node features
+                                                                                                   K
+logx : B → Tx B for tangent vector v and point y are                               {xis ∈ B N ×C }s=1 in the receptive ﬁeld of the kernel into
+                                                                               features xi ∈ B N ×CK using a Poincaré β-concatenation,
+                                       λx ||v||      v
+           expx (v) = x ⊕ tanh                                (5)                  which is then operated on by a Poincaré fully connected layer
+                                          2        ||v||
+                                                                                   as shown in Fig. 1. These transformations produce X l+1 :
+                      2                            −x ⊕ y
+        logx (y) =       tanh−1 (|| − x ⊕ y||)                (6)
+                    λx                          || − x ⊕ y||                                                                          K
+                                                                                      X l+1 = τ -conv(X l ) = {F c (β-cat({xis }s=1 ))}i=1
+                                                                                                                                              n
+                                                                                                                                                      (12)
+
+
+
+                                                                             850
+
+
+ Authorized licensed use limited to: Vanderbilt University Libraries. Downloaded on February 06,2023 at 09:24:52 UTC from IEEE Xplore. Restrictions apply.
+   Fig. 1: Overview of our proposed THINK framework for distance-guided hyperbolic aggregation and interaction learning.
+B. Distance-Aware Hyperbolic Aggregation                                            With the help of the attention coefﬁcients αij , the hyper-
+   We use hypergraph convolutions in the hyperbolic rather                        graph convolution HA(·) updates the hyperbolic node features
+than the Euclidean space [9]. As the hypergraph grows expo-                       U = {u1 , . . . , u|V | } to a new set of hyperbolic features
+nentially, we use the hyperbolic space, where we can obtain                       U  = {u1 , . . . , u|V | }, given by U  = HA(G, U ), where
+more robust embeddings [15]; in contrast, the polynomial                                              ⎛           ⎛                         ⎞⎞
+growth of the graph volume in the Euclidean space leads to                                                           
+distortion in the embeddings for scale-free networks [14].                            uj = expo ⎝ReLU ⎝
+                                                                                       
+                                                                                                                          αij logo (F (zi ))⎠⎠
+                                                                                                                                     c
+                                                                                                                                                 (15)
+   Next, we describe an attentive hyperbolic hypergraph con-                                                   i|sj ∈ei
+
+volution HA(·), which beneﬁts from the expressiveness of                          We now generalize the above hyperbolic hypergraph convolu-
+both hypergraphs and hyperbolic embeddings [15]. We apply                         tion HA(·) to time-varying input features Ql ∈ B τ ×N ×C and
+the attentive hyperbolic hypergraph convolution HA(·) on the                                                                    τ
+                                                                                  time-evolving dynamic hypergraphs G = {Gi }i=1 and denote
+hypergraph G(V, E), where V = {v1 , . . . , v|V | } is a set of                   it by HA (·). The generalized attentive hyperbolic hypergraph
+                                                                                           τ
+nodes and E = {e1 , . . . , e|E| } is a set of hyperedges, and each               convolution layer HAτ (·) applies the same HA(·) layer to each
+hyperedge ei connects a subset of nodes {vj ∈ ei }. As shown                      snapshot Gi of the input and outputs features Ql+1 given by
+in Fig. 1, DHHAN is composed of two steps:                                                                                                   τ
+Node to Hyperedge Aggregation computes the hyperedge                                  Ql+1 = HAτ (Ql , G) = {HA(Gt , Qlt ∈ B N ×C )}t=1               (16)
+feature vector zi by aggregating the hyperbolic features                          C. THINK: End-to-End Framework
+{uk |vk ∈ ei } of the nodes that belong to hyperedge ei . In
+particular, we use the Einstein midpoint [27], which general-                       We position the DHHAN between two hyperbolic temporal
+izes mean-based aggregation to the hyperbolic space:                              convolutions. This design choice allows the propagation of
+                 ⎛                                        ⎞                       spatially updated features along the time axis through temporal
+            1                            λ uk                                    convolutions. As shown in Fig. 1, we operate a hyperbolic
+      zi = ⊗ ⎝                                        uk ⎠    (13)               temporal convolution on features XE followed by DHHAN and
+            2                     uj |vj ∈ei (λuj − 1)
+                    uk |vk ∈ei                                                    another hyperbolic temporal convolution that produces ﬁnal
+                                                         2                        outputs ŷ t = THINK(XE , G), given by
+where, λu is the conformal factor, deﬁned as λu = 1−||u||   2.
+
+Hyperedge to Node Aggregation updates the hyperbolic node                           ŷ t = logo (τ -conv ((HAτ (τ -conv(expo (XE ))) , G))) (17)
+features uj using the information from the hyperedges that
+contains the node vj . We use self-attention aggregation to
+learn the varying importance of each relation {ei |vj ∈ ei }                                          IV. E XPERIMENTS
+with respect to node vj . We further develop a hyperbolic                         A. Spatio-temporal & Dynamic Hypergraph Tasks
+distance-aware self-attention mechanism that better preserves
+the hyperbolic properties while propagating information [28].                        In node regression, we aim to forecast each node’s fu-
+We use the hyperbolic distance dB (uj , zi ) between features                     ture value for a single time-step. We evaluate THINK on
+uj and the features of hyperedges containing the node vj ,                        various node regression problems: wind energy forecasting
+i.e., {zi |vj ∈ ei }. The distance-guided attention learns the                    [20], county-level chickenpox cases prediction [19], [20], and
+attention coefﬁcient αij using the node’s hyperbolic feature                      risk forecasting [35] on the Chinese stock exchange (CSE).
+uj and the aggregated hyperedge features {zi |vj ∈ ei }:                          We further apply THINK on spatio-temporal classiﬁcation
+                                                                                  problems, which predict each node’s single time-step future
+              αij = a ⊗ (uj ⊕ zi )  dB (uj , zi )                  (14)         trend. We evaluate THINK on stock movement classiﬁcation
+                                                                                  [2] (on NASDAQ) with targets being stock prices going up,
+where . denotes transposition and a is a trainable vector.                       going down, or staying neutral.
+
+
+
+                                                                            851
+
+
+ Authorized licensed use limited to: Vanderbilt University Libraries. Downloaded on February 06,2023 at 09:24:52 UTC from IEEE Xplore. Restrictions apply.
+ TABLE II: Performance comparison to baselines on spatio-temporal and time-evolving dynamic hypergraphs (mean of 25
+ runs). Purple & pink show the best and the second best results, respectively, and Clf denotes stock movement classiﬁcation on
+ NASDAQ. ∗ indicates signiﬁcant (p < 0.01) improvements over state-of-the-art methods under Wilcoxon’s Signed Rank Test.
+     Dataset               DTT                 CPox             WMill          Risk                   NYSE                       TSE                  Clf
+     δhg                   1.0                  1.5              1.0            1.5                    0.5                        1.5                 1.0
+     δrel                   -                  0.190            0.025          0.176                  0.087                      0.074               0.107
+     Model               MSE(↓)               MSE(↓)            MSE(↓)        MSE(↓)          SR(↑)       NDCG(↑)        SR(↑)         NDCG(↑)       F1(↑)
+     GConvGRU [29]      2.05±5e−3             1.14±9e−4     1.38±3e−3        0.61±6e−3      0.89±2e−3     0.57±4e−3     0.81±9e−4      0.55±1e−3    0.25±2e−4
+     EGCN-O [30]        2.06±5e−3             1.12±4e−3     1.36±9e−4        0.57±8e−4      0.92±4e−3     0.59±6e−3     0.83±1e−3      0.57±5e−3    0.28±3e−3
+     DCRNN [31]         2.05±4e−3             1.12±6e−3     1.28±4e−3        0.45±2e−3      0.98±5e−3     0.69±9e−4     0.92±3e−3      0.64±8e−4    0.32±2e−3
+     TGCN [32]          2.04±1e−3             1.11±2e−3     1.27±5e−3        0.43±3e−3      1.02±1e−3     0.71±6e−3     0.93±2e−3      0.67±1e−3    0.34±4e−3
+     ST-TGCN [33]       2.04±3e−3             1.12±1e−3     1.24±2e−3        0.37±1e−3      1.04±2e−3     0.70±3e−3     0.96±8e−4      0.71±6e−3    0.37±4e−3
+     DyGrAE [34]        2.03±1e−3             1.12±6e−3     1.24±3e−3        0.40±2e−3      1.03±8e−4     0.72±4e−3     0.95±3e−3      0.69±5e−3    0.36±2e−3
+     RSR-I [1]                   -            1.13±2e−3     1.23±5e−3        0.39±4e−3      1.05±1e−3     0.75±6e−3     0.99±1e−3      0.72±9e−4    0.38±6e−3
+     EGCN-H [30]        2.04±4e−3             1.11±9e−4     1.21±2e−3        0.39±8e−2      1.03±3e−3     0.72±6e−3     0.96±1e−3      0.71±2e−3    0.37±4e−3
+                                −3
+     STHGCN [2]         1.03±6e               1.11±2e−3     1.19±1e−3        0.37±4e−3      1.10±3e−3     0.78±6e−3     1.07±2e−3      0.74±5e−3    0.40±1e−3
+     TC ONV + DHHAN 0.61±3e−3 ∗           1.10±6e−3        1.08±2e−3 ∗      0.34±3e−3 ∗    1.14±7e−3 ∗   0.81±1e−3 ∗   1.11±2e−3 ∗    0.76±5e−3    0.44±8e−3 ∗
+     THINK          0.58±5e−3 ∗          1.09±4e−3 ∗       1.05±2e−3 ∗      0.32±2e−3 ∗    1.18±4e−3 ∗   0.86±9e−4 ∗   1.19±6e−3 ∗   0.81±7e−4 ∗   0.49±4e−3 ∗
+
+            0.7                                                                                               V. R ESULTS AND A NALYSIS
+                                              1.14                  CPox
+                          DTT
+                                                                                          A. Performance Comparison
+           0.65
+                                              1.12
+                                                                                             We evaluate THINK on various spatio-temporal and dynamic
+                                     MSE ←−
+  MSE ←−
+
+
+
+
+            0.6
+                                                                                          hypergraph problems in Table II, and we observe that THINK
+                                               1.1
+                                                                                          is the new state of the art across most datasets, and that it can
+                                                                                          generalize to various downstream applications spanning across
+           0.55
+                                              1.08                                        time-evolving dynamic and spatio-temporal hypergraphs. This
+                                                                                          improvement is due to two aspects: (i) hypergraph learning
+                  HHN    THINK                            HHN       THINK                 and (ii) hyperbolic geometry. First, THINK captures higher-
+Fig. 2: Performance distribution with conﬁdence intervals                                 order relations via hypergraphs instead of constraining them
+(over 25 runs) of hyperbolic hypergraph network (HHN, ﬁrst,                               as pairwise edges in ordinary graphs (RSR-I, EGCN-H).
+pink), and THINK (second, blue). We use the same hyperbolic                               Second, spatio-temporal learning can signiﬁcantly beneﬁt from
+temporal convolution for DTT and CPox datasets.                                           hyperbolic geometry, especially in datasets that exhibit scale-
+                                                                                          free nature [15]. A common limitation of spatio-temporal
+   Finally, we apply THINK on stock ranking [2] over the                                  (hyper)graph approaches (STHGCN, EGCN-H) is that they
+Tokyo Stock Exchange (TSE) [21] and the New York Stock                                    use the Euclidean space to encode scale-free properties of
+Exchange (NYSE) [1] markets. Following [1], we formulate                                  spatio-temporal and time-evolving dynamic networks, which
+stock prediction as a ranking problem, where our target is to                             leads to high distortion in their learned representations [14].
+learn a ranking function that maps a set of stocks to a ranking                           Impact of Hyperbolic Temporal Convolution. In order to
+list. In the learned ranking list, stocks with higher ranking                             further quantify the improvements due to hyperbolic learning
+scores are expected to yield higher proﬁts.                                               in the temporal domain, we compare it to Euclidean learning
+                                                                                          in Table II. Speciﬁcally, we replace the hyperbolic temporal
+B. Evaluation Measures                                                                    convolution with a Euclidean temporal convolution [3]. We
+                                                                                          observe signiﬁcant (p < 0.01) improvements when using
+   We evaluate risk prediction, chickenpox cases forecasting,
+                                                                                          hyperbolic learning for representing the time-series data. This
+and windmill power via Mean Squared Error (MSE). We eval-
+                                                                                          improvement empirically validates that hyperbolic learning in
+uate THINK on node classiﬁcation using F1-score. We evaluate
+                                                                                          the temporal front equips THINK with geometrically appro-
+THINK ’s proﬁtability and ranking ability using Sharpe Ratio
+                                                                                          priate inductive biases for better representing the power law
+(SR) and Normalized Discounted Cumulative gain (NDCG).
+                                                                                          dynamics of temporal data.
+The Sharpe Ratio is a measure of the return Ra in excess of
+                                         E[R −R ]
+a risk-free return Rf , given by SR = std[Raa −Rff ] . Following                          B. Impact of Distance-Aware Self-Attention
+[1], we adopt a daily-buy-hold trading strategy in which, on                                 In order to contextualize the improvements from our
+trading day t, we acquire a ranked list of stocks based on the                            distance-guided self-attention hyperbolic message propaga-
+predicted return ratio for every stock. From this list, we buy                            tion, we contrast THINK to a version without the enhancement
+the top-k stocks, which are sold at the closing market price of                           of distance attention (HHN). The results are shown in Fig. 2,
+the following day t + 1.1                                                                 where can see that the model without the enhancement of
+                                                                                          distance attention reduces the overall performance on all
+  1 We release our code at: https://github.com/shivamag125/ICDM22-THINK
+                                                                                          datasets and also increases the variance.
+
+
+
+                                                                                   852
+
+
+ Authorized licensed use limited to: Vanderbilt University Libraries. Downloaded on February 06,2023 at 09:24:52 UTC from IEEE Xplore. Restrictions apply.
+                     NYSE                                                    NYSE                                                      VI. C ONCLUSION
+   1.2                                                                                                               Building on our δhg hyperbolicity formulation for hyper-
+
+
+
+
+                                                                        δhg = 1
+                                          1.1
+
+
+
+
+                                                                                  δhg = 1
+                        δhg = 0.5                                                                                 graphs, we introduced an elegant distance-guided attentive
+
+
+
+
+                                                                                            δhg = 1.5
+   1.1
+                                             1                                                                    hyperbolic hypergraph neighborhood aggregation mechanism
+ SR
+
+
+
+
+                                        SR
+                                                                                                                  (DHHAN), which better captures higher-order relations in the
+
+
+
+
+                                                       δhg = 0.5
+      1
+                                          0.9                                                                     hyperbolic space. Then, using DHHAN as a building block,
+                                                                                                                  we developed an end-to-end framework, THINK, which blends
+   0.9
+                                          0.8                                                                     hyperbolic temporal convolutions with spatial DHHAN. Our
+          500   15     9      5     3             31               28       22      16                  2         experiments on seven downstream tasks demonstrated THINK’s
+                Hyperedge Degree                                        Node Degree
+                                                                                                                  effectiveness over dynamic time-evolving and spatio-temporal
+      (a) Hyperedge Decomposition                (b) Hyperedge Dropping                                           hypergraph networks in comparison to various benchmarks.
+Fig. 3: Performance variation with (a) successive hyperedge
+decomposition and (b) hyperedge removal with error bounds                                                                                    ACKNOWLEDGMENT
+(over 25 independent runs). The blue (top curve) and red (bot-                                                       This research was supported in part by the US DARPA
+tom curve) indicate THINK and Euclidean THINK (Euclidean                                                          KAIROS Program No. FA8750-19-2-1004 and INCAS Pro-
+temporal convolution + hypergraph attention), respectively.                                                       gram No. HR001121C0165, National Science Foundation IIS-
+                                                                                                                  19-56151, IIS-17-41317, and IIS 17-04532, and the Molecule
+   These observations suggest that thanks to its hyperbolic                                                       Maker Lab Institute: An AI Research Institutes program sup-
+distance-guided message propagation THINK can better cap-                                                         ported by NSF under Award No. 2019897, and the Institute
+ture the impact of a node on the overall representation of                                                        for Geospatial Understanding through an Integrative Discovery
+the group. Moreover, these observations tie up with those of                                                      Environment (I-GUIDE) by NSF under Award No. 2118329.
+[28], who showed that distance-aware aggregations preserve
+hyperbolic message aggregations in the tangent space using                                                                                        R EFERENCES
+hyperbolic distances.                                                                                              [1] F. Feng, X. He, X. Wang, C. Luo, Y. Liu, and T.-S. Chua, “Temporal re-
+                                                                                                                       lational ranking for stock prediction,” ACM Transactions on Information
+                                                                                                                       Systems, 2019.
+C. Impact of Hypergraph & Hyperbolic Learning                                                                      [2] R. Sawhney, S. Agarwal, A. Wadhwa, and R. R. Shah, “Spatiotemporal
+                                                                                                                       hypergraph convolution network for stock movement forecasting,” in
+Impact of Hypergraph Learning. We compare the perfor-                                                                  2020 IEEE International Conference on Data Mining, 2020.
+mance of representing relations as hyperedges vs. as ordinary                                                      [3] S. Guo, Y. Lin, N. Feng, C. Song, and H. Wan, “Attention based spatial-
+pairwise edges. We decompose each hyperedge of degree n                                                                temporal graph convolutional networks for trafﬁc ﬂow forecasting,”
+                                                                                                                       AAAI Conference on Artiﬁcial Intelligence, Jul. 2019.
+into n2 pairwise edges in increasing order of hyperedge                                                            [4] D. Cao, Y. Wang, J. Duan, C. Zhang, X. Zhu, C. Huang, Y. Tong,
+degree, and we analyze the performance variation as we                                                                 B. Xu, J. Bai, J. Tong, and Q. Zhang, “Spectral temporal graph neural
+decompose hyperedges in Fig. 3a.2 We observe poorer per-                                                               network for multivariate time-series forecasting,” in Advances in Neural
+                                                                                                                       Information Processing Systems NeurIPS 2020, 2020.
+formance as we decompose hyperedges into pairwise edges                                                            [5] S. Kumar, X. Zhang, and J. Leskovec, “Predicting dynamic embedding
+since decomposing hyperedges induces noise in the network.                                                             trajectory in temporal interaction networks,” in International Conference
+The worst performance is achieved when all hyperedges are                                                              on Knowledge Discovery & Data Mining, 2019.
+                                                                                                                   [6] D. Xu, C. Ruan, E. Korpeoglu, S. Kumar, and K. Achan, “Inductive
+decomposed, which is when THINK degenerates to hyperbolic                                                              representation learning on temporal graphs,” in International Conference
+graph attention model. Through this experiment, we note that                                                           on Learning Representations, 2020.
+hypergraphs effectively capture higher-order relations between                                                     [7] P. Veličković, G. Cucurull, A. Casanova, A. Romero, P. Liò, and
+nodes as opposed to simple graphs.                                                                                     Y. Bengio, “Graph attention networks,” in International Conference on
+                                                                                                                       Learning Representations, 2018.
+Impact of Hyperbolic Learning We probe the impact of                                                               [8] J. Yi and J. Park, “Hypergraph convolutional recurrent neural network,”
+highly inﬂuential nodes (hubs) and the effectiveness of domain                                                         in International Conference on Knowledge Discovery, 2020.
+                                                                                                                   [9] S. Bai, F. Zhang, and P. H. Torr, “Hypergraph convolution and hyper-
+knowledge on THINK’s performance. We identify hubs of the                                                              graph attention,” Pattern Recognition, 2021.
+scale-free network by sorting the nodes in decreasing order                                                       [10] R. Zhang, Y. Zou, and J. Ma, “Hyper-sagnn: a self-attention based
+of their degree and we successively remove the corresponding                                                           graph neural network for hypergraphs,” in International Conference on
+                                                                                                                       Learning Representations, 2019.
+hubs’ hyperedges. Then, we compare THINK to its Euclidean                                                         [11] S. Battiston, J. B. Glattfelder, D. Garlaschelli, F. Lillo, and G. Caldarelli,
+variant in Fig. 3b.2 We observe poorer performance for both                                                            “The structure of ﬁnancial networks,” in Network Science, 2010.
+models as we remove edges, and they perform the worst after                                                       [12] S. Fang and P. Egan, “Measuring contagion effects between crude oil
+                                                                                                                       and chinese stock market sectors,” The Quarterly Review of Economics
+all hyperedges are removed, which essentially degenerates                                                              and Finance, 2018.
+THINK to a temporal model. Interestingly, we note that as we                                                      [13] W. Chen, W. Fang, G. Hu, and M. W. Mahoney, “On the hyperbolicity
+isolate the most inﬂuential hubs, THINK’s performance drops                                                            of small-world and tree-like random graphs,” arXiv:1201.1717, 2013.
+(larger drops in hypergraphs with low δhg ), likely because it is                                                 [14] F. Sala, C. De Sa, A. Gu, and C. Re, “Representation tradeoffs for
+                                                                                                                       hyperbolic embeddings,” in Machine Learning Research, 2018.
+unable to incorporate their strong impact on other nodes and                                                      [15] I. Chami, Z. Ying, C. Ré, and J. Leskovec, “Hyperbolic graph convolu-
+the network becomes less hyperbolic.                                                                                   tional neural networks,” in Advances in Neural Information Processing
+                                                                                                                       Systems 32, 2019.
+                                                                                                                  [16] M. Gromov, “Hyperbolic groups,” in Essays in Group Theory. Springer
+  2 Note that we observe similar trends in other datasets.
+                                                                                                                       New York, 1987.
+
+
+
+
+                                                                                                            853
+
+
+ Authorized licensed use limited to: Vanderbilt University Libraries. Downloaded on February 06,2023 at 09:24:52 UTC from IEEE Xplore. Restrictions apply.
+[17] L. Lu and X. Peng, “High-ordered random walks and generalized
+     laplacians on hypergraphs,” in International Workshop on Algorithms
+                                                                                        Algorithm 1: s-walk-distance
+     and Models for the Web-Graph, 2011.                                                 Input : Incidence matrix H|V|×|E| , int s, source S,
+[18] F. Béres, D. M. Kelen, R. Pálovics, and A. A. Benczúr, “Node embed-
+     dings in dynamic graphs,” Applied Network Science, Aug. 2019.
+                                                                                                   target T
+[19] B. Rozemberczki, P. Scherer, O. Kiss, R. Sarkar, and T. Ferenci,                    Result: s-distance between S and T
+     “Chickenpox cases in Hungary: a benchmark dataset for spatiotemporal                initialize s adj |V |×|V | = 0;
+     signal processing with graph neural networks,” arXiv:2102.08100, 2021.
+[20] B. Rozemberczki, P. Scherer, Y. He, G. Panagopoulos, M. Astefanoaei,
+                                                                                         for each vertex v ∈ V do
+     O. Kiss, F. Beres, N. Collignon, and R. Sarkar, “PyTorch geometric                       e = H[v];
+     temporal: Spatiotemporal signal processing with neural machine learning                  for each vertex v  ∈ V do
+     models,” arXiv:2104.07788, 2021.
+                                                                                                  ne = H[v  ];
+[21] W. Li, R. Bao, K. Harimoto, D. Chen, J. Xu, and Q. Su, “Modeling
+     the stock relation with graph network for overnight stock movement                           if length (e ∩ ne) >= s then
+     prediction,” in International Joint Conference on Artiﬁcial Intelligence,                         s adj[v][v  ] = 1;
+     2020.                                                                                        end
+[22] J. Huang, Y. Zhang, J. Zhang, and X. Zhang, “A tensor-based sub-mode
+     coordinate algorithm for stock prediction,” in IEEE Conference on Data                   end
+     Science in Cyberspace, 2018.                                                        end
+[23] M. Borassi, A. Chessa, and G. Caldarelli, “Hyperbolicity measures                   G = create graph from adjacency(s adj);
+     democracy in real-world networks,” Physical Review E, 2015.
+[24] A. Tifrea, G. Becigneul, and O.-E. Ganea, “Poincare GloCe: Hyperbolic               return Dijkstra(G, S)[T ]
+     word embeddings,” in International Conference on Learning Represen-
+     tations, 2019.
+[25] R. Shimizu, Y. Mukuta, and T. Harada, “Hyperbolic neural networks++,”
+     in International Conference on Learning Representations, 2021.
+                                                                                         The Gromov product for features x and y is given by
+[26] X. Gabaix, P. Gopikrishnan, V. Plerou, and H. E. Stanley, “A theory of                                  1
+     power-law distributions in ﬁnancial market ﬂuctuations,” Nature, 2003.                      (y, z)x = (l(x, y) + l(x, z) − l(y, z))      (18)
+[27] A. A. Ungar, Analytic hyperbolic geometry: Mathematical foundations
+                                                                                                             2
+     and applications, 2005.                                                           where l(x, y) is the Euclidean distance between x and y.
+[28] S. Zhu, S. Pan, C. Zhou, J. Wu, Y. Cao, and B. Wang, “Graph geometry                We deﬁne the δ hyperbolicity as the smallest non-negative
+     interaction learning,” in Advances in Neural Information Processing
+     Systems, 2020.
+                                                                                       value such that the following holds:
+[29] Y. Seo, M. Defferrard, P. Vandergheynst, and X. Bresson, “Structured                          (x, z)w ≥ min((x, y)w , (y, z)w ) − δ.              (19)
+     sequence modeling with graph convolutional recurrent networks,” in
+     International Conference on Neural Information Processing, 2018.                     Following [36], we use the scale-invariant δrel hyperbolicity,
+[30] A. Pareja, G. Domeniconi, J. Chen, T. Ma, T. Suzumura, H. Kanezashi,                                  2δ
+     T. Kaler, T. Schardl, and C. Leiserson, “EvolveGCN: Evolving graph                given by δrel = diam(W  ) , where diam(W ) is the largest pairwise
+     convolutional networks for dynamic graphs,” in AAAI Conference on                 distance (diameter) for the metric space W . By deﬁnition,
+     Artiﬁcial Intelligence, 2020.                                                     δrel ∈ [0, 1] and speciﬁes how close a dataset is to a hyperbolic
+[31] Y. Li, R. Yu, C. Shahabi, and Y. Liu, “Diffusion convolutional recurrent
+     neural network: Data-driven trafﬁc forecasting,” in International Con-            space. A low δrel hyperbolicity (i.e., close to 0) for a network
+     ference on Learning Representations, 2018.                                        indicates that it has an underlying hyperbolic geometry.
+[32] L. Zhao, Y. Song, C. Zhang, Y. Liu, P. Wang, T. Lin, M. Deng, and H. Li,          B. Hypergraph Construction
+     “T-GCN: A temporal graph convolutional network for trafﬁc prediction,”
+     IEEE Transactions on Intelligent Transportation Systems, 2019.                       We construct a hypergraph G = (V, E), where each vertex
+[33] X. Xu, T. Zhang, C. Xu, Z. Cui, and J. Yang, “Spatial-temporal tensor             v ∈ V , and each hyperedge e ∈ E is a subset of related nodes.
+     graph convolutional network for trafﬁc prediction,” CoRR, 2021.
+[34] A. Taheri and T. Berger-Wolf, “Predictive temporal embedding of
+                                                                                       DTT, CPox, WMill Following [37], we created hyperedges
+     dynamic graphs,” in IEEE/ACM International Conference on Advances                 based on the neighborhood of each node. For each node
+     in Social Networks Analysis and Mining.                                           v, we ﬁrst found the neighbors N (v) and we created a
+[35] S. Kogan, D. Levin, B. R. Routledge, J. S. Sagi, and N. A. Smith,                 set N = {(v, N (v))|v ∈ V }. Then, we merged pairs of
+     “Predicting risk from ﬁnancial reports with regression,” in Annual
+     Conference of the North American Chapter of the Association for                   elements (vi , N (vi )), (vj , N (vj )) based on their similarity
+     Computational Linguistics, 2009.                                                  which is calculated using Sørensen-Dice coefﬁcient (SCD). We
+[36] V. Khrulkov, L. Mirvakhabova, E. Ustinova, I. Oseledets, and V. Lem-              calculated SCD for every pair of elements and we merged them
+     pitsky, “Hyperbolic image embeddings,” in IEEE/CVF Conference on
+     Computer Vision and Pattern Recognition, 2020.                                    until no two pairs had an SCD score lower than a threshold.
+[37] X. Sun, H. Yin, B. Liu, H. Chen, J. Cao, Y. Shao, and N. Q. Viet Hung,            Stock Datasets: NYSE, NASDAQ, TSE and CSE Following
+     “Heterogeneous hypergraph embedding for graph classiﬁcation,” in ACM              [38] we constructed hyperedges between stocks based on:
+     International Conference on Web Search and Data Mining, 2021.
+[38] R. Sawhney, S. Agarwal, A. Wadhwa, T. Derr, and R. R. Shah, “Stock                (i) industry hyperedges and (i) Wiki corporate hyperedges.
+     selection via spatiotemporal hypergraph attention network: A learning             The former connect stocks belonging to the same industry,
+     to rank approach,” AAAI Conference on Artiﬁcial Intelligence, 2021.               while the latter consist of ﬁrst- and second-order corporate
+                                                                                       relationships between stocks. The ﬁrst-order relation is deﬁned
+                                                                                              R1
+                                A PPENDIX                                              as X −→ Y, where R1 represents the entity-relation between
+A. Dataset-Level δrel Hyperbolicity Estimation                                         stocks X,Y. We constructed a hyperedge of a source stock and a
+                                                                                       set of target stocks related to it via the same Wikidata relation.
+   Following [24], we use the Gromov product [16] to estimate                          The second-order relation is pairwise in nature and deﬁned as
+the dataset-level hyperbolicity. Let us deﬁne x, y, z ∈ W as                               R2      R3
+                                                                                       X −→ Z ←− Y, where Z denotes an entity connecting X and
+the temporal features, where W is the metric space.                                    Y via entity-relations R2, and R3.
+
+
+
+
+                                                                                 854
+
+
+  Authorized licensed use limited to: Vanderbilt University Libraries. Downloaded on February 06,2023 at 09:24:52 UTC from IEEE Xplore. Restrictions apply.
+
