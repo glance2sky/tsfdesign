@@ -77,12 +77,11 @@ class LowRankTemporalProjection(nn.Module):
 
 
 class MultiScaleTemporalProjection(nn.Module):
-    """Fine-to-coarse temporal projection with zero-starting coarse branches.
+    """Fine-to-coarse temporal projection with low-frequency corrections.
 
-    The fine branch preserves the original direct head. Coarse branches first
-    pool the history to lower temporal resolutions and then project each
-    resolution to the forecast horizon. Their bounded gates start at zero, so
-    enabling this module does not perturb the v3 function at initialization.
+    Coarse branches are output-zero initialized, while their gates start at
+    one. This preserves the original fine branch at initialization without
+    blocking gradients to the coarse projection parameters.
     """
 
     def __init__(
@@ -114,14 +113,22 @@ class MultiScaleTemporalProjection(nn.Module):
         self.coarse_projections = nn.ModuleList()
         for factor in factors[1:]:
             pooled_length = max(1, (input_length + factor - 1) // factor)
-            self.coarse_projections.append(
-                LowRankTemporalProjection(
-                    input_length=pooled_length,
-                    output_length=output_length,
-                    feature_dim=feature_dim,
-                    rank=rank,
-                )
+            projection = LowRankTemporalProjection(
+                input_length=pooled_length,
+                output_length=output_length,
+                feature_dim=feature_dim,
+                rank=rank,
             )
+            if projection.rank is None:
+                nn.init.zeros_(projection.full_projection.weight)
+                nn.init.zeros_(projection.full_projection.bias)
+            else:
+                nn.init.zeros_(projection.output_basis)
+                nn.init.zeros_(projection.output_anchor)
+            self.coarse_projections.append(projection)
+        self.coarse_norms = nn.ModuleList(
+            [nn.LayerNorm(feature_dim) for _ in factors[1:]]
+        )
         self.coarse_gate_raw = nn.Parameter(torch.zeros(len(factors) - 1))
 
     @property
@@ -129,7 +136,11 @@ class MultiScaleTemporalProjection(nn.Module):
         """Expose the fine-branch rank for backwards-compatible inspection."""
         return self.base_projection.rank
 
-    def forward(self, values: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        values: torch.Tensor,
+        return_diagnostics: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if values.ndim != 3:
             raise ValueError("values must have shape [batch, time, features]")
         if values.size(1) != self.input_length:
@@ -139,19 +150,27 @@ class MultiScaleTemporalProjection(nn.Module):
 
         projected = self.base_projection(values)
         values_time_first = values.transpose(1, 2)
-        gates = torch.tanh(self.coarse_gate_raw)
-        for gate, projection, factor in zip(
-            gates, self.coarse_projections, self.factors[1:]
+        gates = torch.exp(0.25 * torch.tanh(self.coarse_gate_raw))
+        contributions = []
+        for gate, projection, norm, factor in zip(
+            gates, self.coarse_projections, self.coarse_norms, self.factors[1:]
         ):
             pooled_length = max(1, (self.input_length + factor - 1) // factor)
             pooled = F.adaptive_avg_pool1d(
                 values_time_first, pooled_length
             ).transpose(1, 2)
-            projected = projected + gate * projection(pooled)
+            correction = gate * norm(projection(pooled))
+            projected = projected + correction
+            contributions.append(correction.detach().abs().mean())
+        if return_diagnostics:
+            return projected, {
+                "scale_gates": gates.detach(),
+                "scale_contributions": torch.stack(contributions),
+            }
         return projected
 
     def gate_values(self) -> torch.Tensor:
-        return torch.tanh(self.coarse_gate_raw)
+        return torch.exp(0.25 * torch.tanh(self.coarse_gate_raw))
 
 
 class LocalTrendResidual(nn.Module):
@@ -325,6 +344,84 @@ class AdaptivePathFusion(nn.Module):
         }
 
 
+class PathAmplitudeCalibration(nn.Module):
+    """Conditionally calibrate direct and residual path amplitudes.
+
+    The v4 fusion layer can trade path coefficients, but the two paths can
+    still have very different output magnitudes. This module learns a small
+    variable-conditional rescaling before fusion. All deltas start at zero,
+    so the initial scale of both paths is exactly one.
+    """
+
+    def __init__(
+        self,
+        output_dim: int,
+        hidden_dim: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if output_dim <= 0:
+            raise ValueError("output_dim must be positive")
+        self.output_dim = output_dim
+        self.condition = nn.Sequential(
+            nn.Linear(3, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.scale_projection = nn.Linear(hidden_dim, 2)
+        self.path_scale_raw = nn.Parameter(torch.zeros(2, output_dim))
+        nn.init.zeros_(self.scale_projection.weight)
+        nn.init.zeros_(self.scale_projection.bias)
+
+    def forward(
+        self,
+        direct: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        if direct.ndim != 3 or residual.ndim != 3:
+            raise ValueError(
+                "direct and residual must have shape [batch, horizon, variables]"
+            )
+        if direct.shape != residual.shape:
+            raise ValueError("direct and residual must have the same shape")
+        if direct.size(-1) != self.output_dim:
+            raise ValueError(
+                f"Expected {self.output_dim} output variables, got {direct.size(-1)}"
+            )
+
+        direct_abs = direct.detach().abs().mean(dim=1)
+        residual_abs = residual.detach().abs().mean(dim=1)
+        ratio = residual_abs / direct_abs.clamp_min(1e-5)
+        features = torch.stack(
+            (
+                torch.log1p(direct_abs),
+                torch.log1p(residual_abs),
+                torch.log1p(ratio),
+            ),
+            dim=-1,
+        )
+        hidden = self.condition(features)
+        dynamic_delta = self.scale_projection(hidden)
+        static_delta = self.path_scale_raw.transpose(0, 1).unsqueeze(0)
+        scales = torch.exp(0.5 * torch.tanh(dynamic_delta + static_delta))
+        calibrated_direct = direct * scales[..., 0].unsqueeze(1)
+        calibrated_residual = residual * scales[..., 1].unsqueeze(1)
+        return {
+            "direct": calibrated_direct,
+            "residual": calibrated_residual,
+            "scales": scales,
+            "direct_scale_mean": scales[..., 0].detach().mean(),
+            "residual_scale_mean": scales[..., 1].detach().mean(),
+            "scale_std": scales.detach().std(unbiased=False),
+            "calibration_correction_abs_mean": (
+                calibrated_direct
+                + calibrated_residual
+                - direct
+                - residual
+            ).detach().abs().mean(),
+        }
+
+
 class DirectForecastHead(nn.Module):
     """Structured direct multi-horizon head.
 
@@ -347,6 +444,7 @@ class DirectForecastHead(nn.Module):
         use_multiscale_projection: bool = False,
         multiscale_factors: tuple[int, ...] = (1, 2, 4),
         use_adaptive_path_fusion: bool = False,
+        use_path_amplitude_calibration: bool = False,
     ) -> None:
         super().__init__()
         self.input_length = input_length
@@ -362,6 +460,7 @@ class DirectForecastHead(nn.Module):
 
         self.use_multiscale_projection = use_multiscale_projection
         self.use_adaptive_path_fusion = use_adaptive_path_fusion
+        self.use_path_amplitude_calibration = use_path_amplitude_calibration
         if use_multiscale_projection:
             self.horizon_projection = MultiScaleTemporalProjection(
                 input_length=input_length,
@@ -414,10 +513,19 @@ class DirectForecastHead(nn.Module):
                 )
             else:
                 self.register_module("path_fusion", None)
+            if use_path_amplitude_calibration:
+                self.path_calibration = PathAmplitudeCalibration(
+                    output_dim=output_dim,
+                    hidden_dim=max(8, min(hidden_dim, 64)),
+                    dropout=dropout,
+                )
+            else:
+                self.register_module("path_calibration", None)
         else:
             self.register_module("linear_residual", None)
             self.register_module("trend_residual", None)
             self.register_module("path_fusion", None)
+            self.register_module("path_calibration", None)
 
     def forward(
         self,
@@ -444,7 +552,14 @@ class DirectForecastHead(nn.Module):
                 f"got {normalized_input.size(1)}"
             )
 
-        hidden = self.horizon_projection(temporal_context)
+        if isinstance(self.horizon_projection, MultiScaleTemporalProjection):
+            hidden, scale_diagnostics = self.horizon_projection(
+                temporal_context,
+                return_diagnostics=True,
+            )
+        else:
+            hidden = self.horizon_projection(temporal_context)
+            scale_diagnostics = None
         hidden = self.context_dropout(self.context_norm(hidden))
         direct = self.output_projection(hidden)
 
@@ -461,8 +576,34 @@ class DirectForecastHead(nn.Module):
             )
             trend_scale = torch.tanh(self.trend_residual.trend_scale_raw)
 
+        if self.path_calibration is None:
+            calibrated_direct = direct
+            calibrated_residual = residual
+            direct_scale_mean = torch.ones(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            residual_scale_mean = torch.ones(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            calibration_scale_std = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            calibration_correction_abs_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+        else:
+            calibration = self.path_calibration(direct, residual)
+            calibrated_direct = calibration["direct"]
+            calibrated_residual = calibration["residual"]
+            direct_scale_mean = calibration["direct_scale_mean"]
+            residual_scale_mean = calibration["residual_scale_mean"]
+            calibration_scale_std = calibration["scale_std"]
+            calibration_correction_abs_mean = calibration[
+                "calibration_correction_abs_mean"
+            ]
+
         if self.path_fusion is None:
-            normalized_prediction = direct + residual
+            normalized_prediction = calibrated_direct + calibrated_residual
             path_weights = torch.ones(
                 direct.size(0),
                 direct.size(1),
@@ -485,8 +626,8 @@ class DirectForecastHead(nn.Module):
             )
         else:
             fusion = self.path_fusion(
-                direct,
-                residual,
+                calibrated_direct,
+                calibrated_residual,
                 normalized_input,
                 target_indices,
             )
@@ -503,11 +644,23 @@ class DirectForecastHead(nn.Module):
             scale_gates = self.horizon_projection.gate_values()
             scale_gate_mean = scale_gates.detach().mean()
             scale_gate_std = scale_gates.detach().std(unbiased=False)
+            scale_contribution_mean = scale_diagnostics[
+                "scale_contributions"
+            ].mean()
+            scale_contribution_std = scale_diagnostics[
+                "scale_contributions"
+            ].std(unbiased=False)
         else:
             scale_gate_mean = torch.zeros(
                 (), device=direct.device, dtype=direct.dtype
             )
             scale_gate_std = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            scale_contribution_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            scale_contribution_std = torch.zeros(
                 (), device=direct.device, dtype=direct.dtype
             )
 
@@ -517,16 +670,28 @@ class DirectForecastHead(nn.Module):
             "trend_scale": trend_scale,
             "scale_gate_mean": scale_gate_mean,
             "scale_gate_std": scale_gate_std,
+            "scale_contribution_mean": scale_contribution_mean,
+            "scale_contribution_std": scale_contribution_std,
             "direct_weight_mean": direct_weight_mean,
             "residual_weight_mean": residual_weight_mean,
             "path_weight_std": path_weight_std,
             "path_weights": path_weights,
             "adaptive_correction_abs_mean": adaptive_correction_abs_mean,
+            "direct_scale_mean": direct_scale_mean,
+            "residual_scale_mean": residual_scale_mean,
+            "calibration_scale_std": calibration_scale_std,
+            "calibration_correction_abs_mean": calibration_correction_abs_mean,
             "direct_abs_mean": direct.detach().abs().mean(),
             "residual_abs_mean": residual.detach().abs().mean(),
             "residual_to_direct_ratio": (
                 residual.detach().abs().mean()
                 / direct.detach().abs().mean().clamp_min(1e-6)
+            ),
+            "calibrated_direct_abs_mean": calibrated_direct.detach().abs().mean(),
+            "calibrated_residual_abs_mean": calibrated_residual.detach().abs().mean(),
+            "calibrated_residual_to_direct_ratio": (
+                calibrated_residual.detach().abs().mean()
+                / calibrated_direct.detach().abs().mean().clamp_min(1e-6)
             ),
             "normalized_prediction": normalized_prediction,
         }
@@ -565,6 +730,7 @@ class HyperbolicTSF(nn.Module):
         use_multiscale_projection: bool = False,
         multiscale_factors: tuple[int, ...] = (1, 2, 4),
         use_adaptive_path_fusion: bool = False,
+        use_path_amplitude_calibration: bool = False,
     ) -> None:
         super().__init__()
         if input_length <= 0 or pred_length <= 0:
@@ -636,6 +802,7 @@ class HyperbolicTSF(nn.Module):
             use_multiscale_projection=use_multiscale_projection,
             multiscale_factors=multiscale_factors,
             use_adaptive_path_fusion=use_adaptive_path_fusion,
+            use_path_amplitude_calibration=use_path_amplitude_calibration,
         )
 
     def forward(

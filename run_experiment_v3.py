@@ -47,6 +47,7 @@ USE_REVIN = True
 USE_LINEAR_RESIDUAL = True
 USE_MULTISCALE_PROJECTION = False
 USE_ADAPTIVE_PATH_FUSION = False
+USE_PATH_AMPLITUDE_CALIBRATION = False
 
 # training
 BATCH_SIZE = 32
@@ -111,6 +112,11 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
             "scale_gate_mean", "scale_gate_std",
             "direct_weight_mean", "residual_weight_mean",
             "path_weight_std", "adaptive_correction_abs_mean",
+            "scale_contribution_mean", "scale_contribution_std",
+            "direct_scale_mean", "residual_scale_mean",
+            "calibration_scale_std", "calibration_correction_abs_mean",
+            "calibrated_direct_abs_mean", "calibrated_residual_abs_mean",
+            "calibrated_residual_to_direct_ratio",
         ]
         for k in head_keys:
             if k in head:
@@ -153,6 +159,7 @@ def train_one(
         use_linear_residual=USE_LINEAR_RESIDUAL,
         use_multiscale_projection=USE_MULTISCALE_PROJECTION,
         use_adaptive_path_fusion=USE_ADAPTIVE_PATH_FUSION,
+        use_path_amplitude_calibration=USE_PATH_AMPLITUDE_CALIBRATION,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -285,7 +292,8 @@ def main():
     print(f"model: manifold={MANIFOLD}, tangent_dim={TANGENT_DIM}, hidden_dim={HIDDEN_DIM}")
     print(f"       configuration: DEFAULT (v1-compatible, no low-rank, no time_identity)")
     print(f"       multiscale_projection={USE_MULTISCALE_PROJECTION}, "
-          f"adaptive_path_fusion={USE_ADAPTIVE_PATH_FUSION}")
+          f"adaptive_path_fusion={USE_ADAPTIVE_PATH_FUSION}, "
+          f"path_amplitude_calibration={USE_PATH_AMPLITUDE_CALIBRATION}")
     variant = "v3-default"
     if USE_MULTISCALE_PROJECTION and USE_ADAPTIVE_PATH_FUSION:
         variant = "v4-multiscale-adaptive"
@@ -293,6 +301,8 @@ def main():
         variant = "v4-multiscale"
     elif USE_ADAPTIVE_PATH_FUSION:
         variant = "v4-adaptive"
+    if USE_PATH_AMPLITUDE_CALIBRATION:
+        variant = f"{variant}-calibrated"
 
     results = []
 
@@ -377,6 +387,7 @@ def main():
                 "use_time_identity": False,
                 "use_multiscale_projection": USE_MULTISCALE_PROJECTION,
                 "use_adaptive_path_fusion": USE_ADAPTIVE_PATH_FUSION,
+                "use_path_amplitude_calibration": USE_PATH_AMPLITUDE_CALIBRATION,
                 "results": results,
             },
             f,

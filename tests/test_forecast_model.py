@@ -130,7 +130,8 @@ def test_multiscale_and_adaptive_head_preserves_shapes_and_diagnostics() -> None
 
     assert output["prediction"].shape == (2, 12, 4)
     assert head["path_weights"].shape == (2, 12, 4, 2)
-    assert head["scale_gate_mean"].item() == 0.0
+    assert head["scale_gate_mean"].item() == 1.0
+    assert head["scale_contribution_mean"].item() == 0.0
     assert torch.allclose(
         head["path_weights"],
         torch.ones_like(head["path_weights"]),
@@ -144,3 +145,44 @@ def test_multiscale_and_adaptive_head_preserves_shapes_and_diagnostics() -> None
     output["prediction"].square().mean().backward()
     assert x.grad is not None
     assert torch.isfinite(x.grad).all()
+
+
+def test_v5_path_calibration_preserves_initial_function_and_has_gradients() -> None:
+    model = HyperbolicTSF(
+        input_length=24,
+        pred_length=12,
+        num_variables=4,
+        tangent_dim=4,
+        hidden_dim=8,
+        manifold="poincare",
+        use_linear_residual=True,
+        use_multiscale_projection=True,
+        use_adaptive_path_fusion=True,
+        use_path_amplitude_calibration=True,
+    )
+    x = torch.randn(2, 24, 4, requires_grad=True)
+    output = model(x, return_aux=True)
+    head = output["head"]
+
+    assert torch.allclose(
+        head["normalized_prediction"],
+        head["direct"] + head["residual"],
+        atol=1e-6,
+    )
+    assert head["scale_gate_mean"].item() == 1.0
+    assert head["scale_contribution_mean"].item() == 0.0
+    assert head["direct_scale_mean"].item() == 1.0
+    assert head["residual_scale_mean"].item() == 1.0
+
+    output["prediction"].square().mean().backward()
+    projection = model.forecast_head.horizon_projection
+    for branch in projection.coarse_projections:
+        branch_grad = sum(
+            parameter.grad.abs().sum()
+            for parameter in branch.parameters()
+            if parameter.grad is not None
+        )
+        assert branch_grad.item() > 0.0
+    calibration_grad = model.forecast_head.path_calibration.path_scale_raw.grad
+    assert calibration_grad is not None
+    assert calibration_grad.abs().sum().item() > 0.0
