@@ -48,6 +48,10 @@ USE_LINEAR_RESIDUAL = True
 USE_MULTISCALE_PROJECTION = False
 USE_ADAPTIVE_PATH_FUSION = False
 USE_PATH_AMPLITUDE_CALIBRATION = False
+USE_OUTPUT_MULTISCALE_RESIDUAL = False
+USE_FREQUENCY_RESIDUAL = False
+OUTPUT_MULTISCALE_FACTORS = (2, 4, 8)
+FREQUENCY_HARMONICS = 8
 
 # training
 BATCH_SIZE = 32
@@ -117,6 +121,11 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
             "calibration_scale_std", "calibration_correction_abs_mean",
             "calibrated_direct_abs_mean", "calibrated_residual_abs_mean",
             "calibrated_residual_to_direct_ratio",
+            "output_multiscale_gate_mean",
+            "output_multiscale_contribution_mean",
+            "frequency_gate",
+            "frequency_contribution_mean",
+            "output_residual_abs_mean",
         ]
         for k in head_keys:
             if k in head:
@@ -160,6 +169,10 @@ def train_one(
         use_multiscale_projection=USE_MULTISCALE_PROJECTION,
         use_adaptive_path_fusion=USE_ADAPTIVE_PATH_FUSION,
         use_path_amplitude_calibration=USE_PATH_AMPLITUDE_CALIBRATION,
+        use_output_multiscale_residual=USE_OUTPUT_MULTISCALE_RESIDUAL,
+        output_multiscale_factors=OUTPUT_MULTISCALE_FACTORS,
+        use_frequency_residual=USE_FREQUENCY_RESIDUAL,
+        frequency_harmonics=FREQUENCY_HARMONICS,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -293,7 +306,9 @@ def main():
     print(f"       configuration: DEFAULT (v1-compatible, no low-rank, no time_identity)")
     print(f"       multiscale_projection={USE_MULTISCALE_PROJECTION}, "
           f"adaptive_path_fusion={USE_ADAPTIVE_PATH_FUSION}, "
-          f"path_amplitude_calibration={USE_PATH_AMPLITUDE_CALIBRATION}")
+          f"path_amplitude_calibration={USE_PATH_AMPLITUDE_CALIBRATION}, "
+          f"output_multiscale_residual={USE_OUTPUT_MULTISCALE_RESIDUAL}, "
+          f"frequency_residual={USE_FREQUENCY_RESIDUAL}")
     variant = "v3-default"
     if USE_MULTISCALE_PROJECTION and USE_ADAPTIVE_PATH_FUSION:
         variant = "v4-multiscale-adaptive"
@@ -303,6 +318,10 @@ def main():
         variant = "v4-adaptive"
     if USE_PATH_AMPLITUDE_CALIBRATION:
         variant = f"{variant}-calibrated"
+    if USE_OUTPUT_MULTISCALE_RESIDUAL:
+        variant = f"{variant}-output-ms"
+    if USE_FREQUENCY_RESIDUAL:
+        variant = f"{variant}-frequency"
 
     results = []
 
@@ -388,6 +407,10 @@ def main():
                 "use_multiscale_projection": USE_MULTISCALE_PROJECTION,
                 "use_adaptive_path_fusion": USE_ADAPTIVE_PATH_FUSION,
                 "use_path_amplitude_calibration": USE_PATH_AMPLITUDE_CALIBRATION,
+                "use_output_multiscale_residual": USE_OUTPUT_MULTISCALE_RESIDUAL,
+                "output_multiscale_factors": OUTPUT_MULTISCALE_FACTORS,
+                "use_frequency_residual": USE_FREQUENCY_RESIDUAL,
+                "frequency_harmonics": FREQUENCY_HARMONICS,
                 "results": results,
             },
             f,

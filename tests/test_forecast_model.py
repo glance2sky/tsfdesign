@@ -186,3 +186,44 @@ def test_v5_path_calibration_preserves_initial_function_and_has_gradients() -> N
     calibration_grad = model.forecast_head.path_calibration.path_scale_raw.grad
     assert calibration_grad is not None
     assert calibration_grad.abs().sum().item() > 0.0
+
+
+def test_v6_output_residuals_are_zero_starting_and_differentiable() -> None:
+    model = HyperbolicTSF(
+        input_length=24,
+        pred_length=12,
+        num_variables=4,
+        tangent_dim=4,
+        hidden_dim=8,
+        manifold="poincare",
+        use_linear_residual=True,
+        use_adaptive_path_fusion=True,
+        use_path_amplitude_calibration=True,
+        use_output_multiscale_residual=True,
+        use_frequency_residual=True,
+        frequency_harmonics=4,
+    )
+    x = torch.randn(2, 24, 4, requires_grad=True)
+    output = model(x, return_aux=True)
+    head = output["head"]
+
+    assert output["prediction"].shape == (2, 12, 4)
+    assert torch.isfinite(output["prediction"]).all()
+    assert head["output_residual_abs_mean"].item() == 0.0
+    assert head["output_multiscale_gate_mean"].item() == 1.0
+    assert head["frequency_gate"].item() == 1.0
+
+    output["prediction"].square().mean().backward()
+    output_ms = model.forecast_head.output_multiscale_residual
+    for branch in output_ms.projections:
+        branch_grad = sum(
+            parameter.grad.abs().sum()
+            for parameter in branch.parameters()
+            if parameter.grad is not None
+        )
+        assert branch_grad.item() > 0.0
+    frequency_grad = (
+        model.forecast_head.frequency_residual.harmonic_projection.grad
+    )
+    assert frequency_grad is not None
+    assert frequency_grad.abs().sum().item() > 0.0

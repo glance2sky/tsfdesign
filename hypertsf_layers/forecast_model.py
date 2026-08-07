@@ -422,6 +422,204 @@ class PathAmplitudeCalibration(nn.Module):
         }
 
 
+class OutputMultiScaleResidual(nn.Module):
+    """Predict low-frequency corrections directly in output space.
+
+    Each branch pools the normalized history to a coarser resolution and
+    projects it to the forecast horizon. The projections start at zero, so
+    enabling the module preserves the v4d function at initialization while
+    keeping gradients available to the branch parameters.
+    """
+
+    def __init__(
+        self,
+        input_length: int,
+        pred_length: int,
+        input_dim: int,
+        output_dim: int,
+        rank: int | None,
+        factors: tuple[int, ...] = (2, 4, 8),
+    ) -> None:
+        super().__init__()
+        if input_length <= 0 or pred_length <= 0:
+            raise ValueError("input_length and pred_length must be positive")
+        if input_dim <= 0 or output_dim <= 0:
+            raise ValueError("input_dim and output_dim must be positive")
+        if not factors or any(factor <= 1 for factor in factors):
+            raise ValueError("output multiscale factors must be greater than 1")
+        if len(set(factors)) != len(factors):
+            raise ValueError("output multiscale factors must be unique")
+
+        self.input_length = input_length
+        self.pred_length = pred_length
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.factors = factors
+        self.projections = nn.ModuleList()
+        for factor in factors:
+            pooled_length = max(1, (input_length + factor - 1) // factor)
+            projection = LowRankTemporalProjection(
+                input_length=pooled_length,
+                output_length=pred_length,
+                feature_dim=input_dim,
+                rank=rank,
+            )
+            if projection.rank is None:
+                nn.init.zeros_(projection.full_projection.weight)
+                nn.init.zeros_(projection.full_projection.bias)
+            else:
+                nn.init.zeros_(projection.output_basis)
+                nn.init.zeros_(projection.output_anchor)
+            self.projections.append(projection)
+        self.gate_raw = nn.Parameter(torch.zeros(len(factors)))
+
+    def forward(
+        self,
+        normalized_input: torch.Tensor,
+        target_indices: torch.Tensor,
+        return_diagnostics: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if normalized_input.ndim != 3:
+            raise ValueError(
+                "normalized_input must have shape [batch, time, variables]"
+            )
+        if normalized_input.size(1) != self.input_length:
+            raise ValueError(
+                f"Expected input length {self.input_length}, "
+                f"got {normalized_input.size(1)}"
+            )
+
+        input_time_first = normalized_input.transpose(1, 2)
+        gates = torch.exp(0.25 * torch.tanh(self.gate_raw))
+        corrections = []
+        for gate, projection, factor in zip(
+            gates, self.projections, self.factors
+        ):
+            pooled_length = max(1, (self.input_length + factor - 1) // factor)
+            pooled = F.adaptive_avg_pool1d(
+                input_time_first, pooled_length
+            ).transpose(1, 2)
+            correction = gate * projection(pooled)
+            corrections.append(correction)
+
+        total = torch.stack(corrections, dim=0).sum(dim=0)
+        target_corrections = total.index_select(
+            -1, target_indices.to(normalized_input.device)
+        )
+        if not return_diagnostics:
+            return target_corrections
+        return target_corrections, {
+            "gates": gates.detach(),
+            "branch_contributions": torch.stack(
+                [value.detach().abs().mean() for value in corrections]
+            ),
+        }
+
+    def gate_values(self) -> torch.Tensor:
+        return torch.exp(0.25 * torch.tanh(self.gate_raw))
+
+
+class FrequencyResidual(nn.Module):
+    """Learn a periodic residual from low-frequency Fourier components.
+
+    The FFT features are deterministic and computed from the normalized
+    history. A zero-initialized projection learns how much each harmonic
+    should contribute, so the optional branch starts as an exact zero
+    correction without blocking gradients to its learnable parameters.
+    """
+
+    def __init__(
+        self,
+        input_length: int,
+        pred_length: int,
+        input_dim: int,
+        output_dim: int,
+        num_harmonics: int = 8,
+    ) -> None:
+        super().__init__()
+        if input_length < 4:
+            raise ValueError("input_length must be at least 4")
+        if input_dim <= 0 or pred_length <= 0 or output_dim <= 0:
+            raise ValueError(
+                "input_dim, pred_length, and output_dim must be positive"
+            )
+        max_harmonics = input_length // 2
+        if num_harmonics <= 0:
+            raise ValueError("num_harmonics must be positive")
+        self.input_length = input_length
+        self.pred_length = pred_length
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.num_harmonics = min(num_harmonics, max_harmonics)
+        self.harmonic_bins = tuple(range(1, self.num_harmonics + 1))
+        self.harmonic_projection = nn.Parameter(
+            torch.zeros(input_dim, self.num_harmonics)
+        )
+        self.variable_scale_raw = nn.Parameter(torch.zeros(input_dim))
+        self.gate_raw = nn.Parameter(torch.zeros(()))
+
+        frequencies = torch.tensor(
+            self.harmonic_bins, dtype=torch.float32
+        ).view(1, 1, -1)
+        future_positions = torch.arange(
+            input_length,
+            input_length + pred_length,
+            dtype=torch.float32,
+        ).view(1, pred_length, 1)
+        phase = 2.0 * torch.pi * frequencies * future_positions / float(
+            input_length
+        )
+        self.register_buffer("future_cos", torch.cos(phase))
+        self.register_buffer("future_sin", torch.sin(phase))
+
+    def forward(
+        self,
+        normalized_input: torch.Tensor,
+        target_indices: torch.Tensor,
+        return_diagnostics: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if normalized_input.ndim != 3:
+            raise ValueError(
+                "normalized_input must have shape [batch, time, variables]"
+            )
+        if normalized_input.size(1) != self.input_length:
+            raise ValueError(
+                f"Expected input length {self.input_length}, "
+                f"got {normalized_input.size(1)}"
+            )
+
+        centered = normalized_input - normalized_input.mean(
+            dim=1, keepdim=True
+        )
+        spectrum = torch.fft.rfft(centered, dim=1)
+        selected = spectrum[:, list(self.harmonic_bins), :]
+        real = selected.real.permute(0, 2, 1)
+        imag = selected.imag.permute(0, 2, 1)
+        harmonic_features = (
+            real.unsqueeze(1) * self.future_cos.unsqueeze(2)
+            - imag.unsqueeze(1) * self.future_sin.unsqueeze(2)
+        )
+        harmonic_features = harmonic_features / float(self.input_length)
+        correction = torch.einsum(
+            "bpch,ch->bpc",
+            harmonic_features,
+            self.harmonic_projection,
+        )
+        correction = correction * torch.exp(
+            0.5 * torch.tanh(self.variable_scale_raw)
+        ).view(1, 1, -1)
+        correction = torch.exp(0.25 * torch.tanh(self.gate_raw)) * correction
+        correction = correction.index_select(
+            -1, target_indices.to(normalized_input.device)
+        )
+        if not return_diagnostics:
+            return correction
+        return correction, {
+            "gate": torch.exp(0.25 * torch.tanh(self.gate_raw)).detach(),
+            "harmonic_contribution": correction.detach().abs().mean(),
+        }
+
+
 class DirectForecastHead(nn.Module):
     """Structured direct multi-horizon head.
 
@@ -445,6 +643,10 @@ class DirectForecastHead(nn.Module):
         multiscale_factors: tuple[int, ...] = (1, 2, 4),
         use_adaptive_path_fusion: bool = False,
         use_path_amplitude_calibration: bool = False,
+        use_output_multiscale_residual: bool = False,
+        output_multiscale_factors: tuple[int, ...] = (2, 4, 8),
+        use_frequency_residual: bool = False,
+        frequency_harmonics: int = 8,
     ) -> None:
         super().__init__()
         self.input_length = input_length
@@ -461,6 +663,8 @@ class DirectForecastHead(nn.Module):
         self.use_multiscale_projection = use_multiscale_projection
         self.use_adaptive_path_fusion = use_adaptive_path_fusion
         self.use_path_amplitude_calibration = use_path_amplitude_calibration
+        self.use_output_multiscale_residual = use_output_multiscale_residual
+        self.use_frequency_residual = use_frequency_residual
         if use_multiscale_projection:
             self.horizon_projection = MultiScaleTemporalProjection(
                 input_length=input_length,
@@ -526,6 +730,28 @@ class DirectForecastHead(nn.Module):
             self.register_module("trend_residual", None)
             self.register_module("path_fusion", None)
             self.register_module("path_calibration", None)
+
+        if use_output_multiscale_residual:
+            self.output_multiscale_residual = OutputMultiScaleResidual(
+                input_length=input_length,
+                pred_length=pred_length,
+                input_dim=input_dim,
+                output_dim=output_dim,
+                rank=self.temporal_rank,
+                factors=output_multiscale_factors,
+            )
+        else:
+            self.register_module("output_multiscale_residual", None)
+        if use_frequency_residual:
+            self.frequency_residual = FrequencyResidual(
+                input_length=input_length,
+                pred_length=pred_length,
+                input_dim=input_dim,
+                output_dim=output_dim,
+                num_harmonics=frequency_harmonics,
+            )
+        else:
+            self.register_module("frequency_residual", None)
 
     def forward(
         self,
@@ -640,6 +866,54 @@ class DirectForecastHead(nn.Module):
                 "adaptive_correction_abs_mean"
             ]
 
+        if self.output_multiscale_residual is None:
+            output_multiscale_correction = torch.zeros_like(normalized_prediction)
+            output_multiscale_gate_mean = torch.ones(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            output_multiscale_contribution_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+        else:
+            (
+                output_multiscale_correction,
+                output_multiscale_diagnostics,
+            ) = self.output_multiscale_residual(
+                normalized_input,
+                target_indices,
+                return_diagnostics=True,
+            )
+            output_multiscale_gate_mean = (
+                output_multiscale_diagnostics["gates"].mean()
+            )
+            output_multiscale_contribution_mean = (
+                output_multiscale_diagnostics["branch_contributions"].mean()
+            )
+
+        if self.frequency_residual is None:
+            frequency_correction = torch.zeros_like(normalized_prediction)
+            frequency_gate = torch.ones(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            frequency_contribution_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+        else:
+            frequency_correction, frequency_diagnostics = self.frequency_residual(
+                normalized_input,
+                target_indices,
+                return_diagnostics=True,
+            )
+            frequency_gate = frequency_diagnostics["gate"]
+            frequency_contribution_mean = frequency_diagnostics[
+                "harmonic_contribution"
+            ]
+
+        output_residual = (
+            output_multiscale_correction + frequency_correction
+        )
+        normalized_prediction = normalized_prediction + output_residual
+
         if isinstance(self.horizon_projection, MultiScaleTemporalProjection):
             scale_gates = self.horizon_projection.gate_values()
             scale_gate_mean = scale_gates.detach().mean()
@@ -677,6 +951,13 @@ class DirectForecastHead(nn.Module):
             "path_weight_std": path_weight_std,
             "path_weights": path_weights,
             "adaptive_correction_abs_mean": adaptive_correction_abs_mean,
+            "output_multiscale_gate_mean": output_multiscale_gate_mean,
+            "output_multiscale_contribution_mean": (
+                output_multiscale_contribution_mean
+            ),
+            "frequency_gate": frequency_gate,
+            "frequency_contribution_mean": frequency_contribution_mean,
+            "output_residual_abs_mean": output_residual.detach().abs().mean(),
             "direct_scale_mean": direct_scale_mean,
             "residual_scale_mean": residual_scale_mean,
             "calibration_scale_std": calibration_scale_std,
@@ -731,6 +1012,10 @@ class HyperbolicTSF(nn.Module):
         multiscale_factors: tuple[int, ...] = (1, 2, 4),
         use_adaptive_path_fusion: bool = False,
         use_path_amplitude_calibration: bool = False,
+        use_output_multiscale_residual: bool = False,
+        output_multiscale_factors: tuple[int, ...] = (2, 4, 8),
+        use_frequency_residual: bool = False,
+        frequency_harmonics: int = 8,
     ) -> None:
         super().__init__()
         if input_length <= 0 or pred_length <= 0:
@@ -803,6 +1088,10 @@ class HyperbolicTSF(nn.Module):
             multiscale_factors=multiscale_factors,
             use_adaptive_path_fusion=use_adaptive_path_fusion,
             use_path_amplitude_calibration=use_path_amplitude_calibration,
+            use_output_multiscale_residual=use_output_multiscale_residual,
+            output_multiscale_factors=output_multiscale_factors,
+            use_frequency_residual=use_frequency_residual,
+            frequency_harmonics=frequency_harmonics,
         )
 
     def forward(
