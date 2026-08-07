@@ -152,6 +152,35 @@ indicate manifold instability. A fusion gate near zero means the variable
 graph is being ignored, while a gate with almost zero standard deviation
 indicates that all time points receive nearly identical variable context.
 
+## Optional Error-Driven Head Extensions
+
+The forecasting head provides two opt-in extensions motivated by the ETTh1
+error analysis:
+
+1. `use_multiscale_projection=True` adds pooled temporal projections at
+   factors such as `(1, 2, 4)`. The fine-scale branch remains the original
+   projection, while coarse branches use zero-initialized bounded gates.
+2. `use_adaptive_path_fusion=True` predicts per-variable and per-horizon
+   coefficients for the graph-aware direct path and the normalized-input
+   residual path. Both coefficients start at one, preserving the original
+   `direct + residual` behavior at initialization.
+
+The additional head diagnostics are:
+
+```text
+scale_gate_mean
+scale_gate_std
+direct_weight_mean
+residual_weight_mean
+path_weight_std
+adaptive_correction_abs_mean
+path_weights
+```
+
+These options are disabled by default so the v3 baseline remains directly
+reproducible. They should be evaluated separately and together rather than
+interpreted as a single undifferentiated architectural change.
+
 ## Capacity-Preserving Defaults
 
 The public `HyperbolicTSF` defaults preserve the original baseline capacity:

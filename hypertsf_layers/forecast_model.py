@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from .front_layers import (
     DualGraphHyperbolicLayer,
@@ -75,6 +76,84 @@ class LowRankTemporalProjection(nn.Module):
         return projected + anchor * values.mean(dim=1, keepdim=True)
 
 
+class MultiScaleTemporalProjection(nn.Module):
+    """Fine-to-coarse temporal projection with zero-starting coarse branches.
+
+    The fine branch preserves the original direct head. Coarse branches first
+    pool the history to lower temporal resolutions and then project each
+    resolution to the forecast horizon. Their bounded gates start at zero, so
+    enabling this module does not perturb the v3 function at initialization.
+    """
+
+    def __init__(
+        self,
+        input_length: int,
+        output_length: int,
+        feature_dim: int,
+        rank: int | None,
+        factors: tuple[int, ...] = (1, 2, 4),
+    ) -> None:
+        super().__init__()
+        if not factors or factors[0] != 1:
+            raise ValueError("factors must start with 1 for the fine branch")
+        if any(factor <= 0 for factor in factors):
+            raise ValueError("all temporal scale factors must be positive")
+        if len(set(factors)) != len(factors):
+            raise ValueError("temporal scale factors must be unique")
+
+        self.input_length = input_length
+        self.output_length = output_length
+        self.feature_dim = feature_dim
+        self.factors = factors
+        self.base_projection = LowRankTemporalProjection(
+            input_length=input_length,
+            output_length=output_length,
+            feature_dim=feature_dim,
+            rank=rank,
+        )
+        self.coarse_projections = nn.ModuleList()
+        for factor in factors[1:]:
+            pooled_length = max(1, (input_length + factor - 1) // factor)
+            self.coarse_projections.append(
+                LowRankTemporalProjection(
+                    input_length=pooled_length,
+                    output_length=output_length,
+                    feature_dim=feature_dim,
+                    rank=rank,
+                )
+            )
+        self.coarse_gate_raw = nn.Parameter(torch.zeros(len(factors) - 1))
+
+    @property
+    def rank(self) -> int | None:
+        """Expose the fine-branch rank for backwards-compatible inspection."""
+        return self.base_projection.rank
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        if values.ndim != 3:
+            raise ValueError("values must have shape [batch, time, features]")
+        if values.size(1) != self.input_length:
+            raise ValueError(
+                f"Expected input length {self.input_length}, got {values.size(1)}"
+            )
+
+        projected = self.base_projection(values)
+        values_time_first = values.transpose(1, 2)
+        gates = torch.tanh(self.coarse_gate_raw)
+        for gate, projection, factor in zip(
+            gates, self.coarse_projections, self.factors[1:]
+        ):
+            pooled_length = max(1, (self.input_length + factor - 1) // factor)
+            pooled = F.adaptive_avg_pool1d(
+                values_time_first, pooled_length
+            ).transpose(1, 2)
+            projected = projected + gate * projection(pooled)
+        return projected
+
+    def gate_values(self) -> torch.Tensor:
+        return torch.tanh(self.coarse_gate_raw)
+
+
 class LocalTrendResidual(nn.Module):
     """Low-variance local level and slope extrapolation."""
 
@@ -135,6 +214,117 @@ class LocalTrendResidual(nn.Module):
         )
 
 
+class AdaptivePathFusion(nn.Module):
+    """Variable- and horizon-conditioned fusion of direct and residual paths.
+
+    The path coefficients are ``2 * sigmoid(logits)`` and the final layer is
+    initialized to zero. Consequently both coefficients start at one and the
+    new head is functionally identical to ``direct + residual`` at
+    initialization. The conditioning features describe local level, scale,
+    range, recent volatility, and recent change for each target variable.
+    """
+
+    def __init__(
+        self,
+        input_length: int,
+        pred_length: int,
+        input_dim: int,
+        output_dim: int,
+        hidden_dim: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if input_length <= 0 or pred_length <= 0:
+            raise ValueError("input_length and pred_length must be positive")
+        if input_dim <= 0 or output_dim <= 0:
+            raise ValueError("input_dim and output_dim must be positive")
+        self.input_length = input_length
+        self.pred_length = pred_length
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.stats_projection = nn.Sequential(
+            nn.Linear(5, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.horizon_embedding = nn.Parameter(
+            torch.empty(1, pred_length, hidden_dim)
+        )
+        self.path_projection = nn.Linear(hidden_dim, 2)
+        nn.init.normal_(self.horizon_embedding, mean=0.0, std=0.02)
+        nn.init.zeros_(self.path_projection.weight)
+        nn.init.zeros_(self.path_projection.bias)
+
+    def forward(
+        self,
+        direct: torch.Tensor,
+        residual: torch.Tensor,
+        normalized_input: torch.Tensor,
+        target_indices: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        if direct.ndim != 3 or residual.ndim != 3:
+            raise ValueError(
+                "direct and residual must have shape [batch, horizon, variables]"
+            )
+        if direct.shape != residual.shape:
+            raise ValueError("direct and residual must have the same shape")
+        if normalized_input.ndim != 3:
+            raise ValueError(
+                "normalized_input must have shape [batch, time, variables]"
+            )
+        if normalized_input.size(1) != self.input_length:
+            raise ValueError(
+                f"Expected input length {self.input_length}, "
+                f"got {normalized_input.size(1)}"
+            )
+        if direct.size(1) != self.pred_length:
+            raise ValueError(
+                f"Expected prediction length {self.pred_length}, "
+                f"got {direct.size(1)}"
+            )
+
+        recent_length = min(24, self.input_length)
+        recent = normalized_input[:, -recent_length:]
+        mean = normalized_input.mean(dim=1)
+        scale = normalized_input.std(dim=1, unbiased=False)
+        value_range = (
+            normalized_input.amax(dim=1) - normalized_input.amin(dim=1)
+        )
+        recent_scale = recent.std(dim=1, unbiased=False)
+        recent_change = recent[:, -1] - recent[:, 0]
+        stats = torch.stack(
+            (mean, scale, value_range, recent_scale, recent_change),
+            dim=-1,
+        )
+        variable_features = self.stats_projection(stats)
+        variable_features = variable_features.index_select(
+            1, target_indices.to(normalized_input.device)
+        )
+        fusion_features = (
+            variable_features.unsqueeze(1)
+            + self.horizon_embedding.unsqueeze(2)
+        )
+        logits = self.path_projection(fusion_features)
+        # Keep the total path mass equal to the original two additive paths.
+        # At zero logits this gives [1, 1], while training can trade mass
+        # between direct and residual branches without amplifying both.
+        weights = 2.0 * torch.softmax(logits, dim=-1)
+        fused = (
+            weights[..., 0] * direct
+            + weights[..., 1] * residual
+        )
+        return {
+            "prediction": fused,
+            "weights": weights,
+            "direct_weight_mean": weights[..., 0].detach().mean(),
+            "residual_weight_mean": weights[..., 1].detach().mean(),
+            "path_weight_std": weights.detach().std(unbiased=False),
+            "adaptive_correction_abs_mean": (
+                fused - direct - residual
+            ).detach().abs().mean(),
+        }
+
+
 class DirectForecastHead(nn.Module):
     """Structured direct multi-horizon head.
 
@@ -154,6 +344,9 @@ class DirectForecastHead(nn.Module):
         use_linear_residual: bool = True,
         temporal_rank: int | None = None,
         trend_window: int | None = None,
+        use_multiscale_projection: bool = False,
+        multiscale_factors: tuple[int, ...] = (1, 2, 4),
+        use_adaptive_path_fusion: bool = False,
     ) -> None:
         super().__init__()
         self.input_length = input_length
@@ -167,15 +360,30 @@ class DirectForecastHead(nn.Module):
             else min(temporal_rank, input_length, pred_length)
         )
 
-        self.horizon_projection = LowRankTemporalProjection(
-            input_length=input_length,
-            output_length=pred_length,
-            feature_dim=hidden_dim,
-            rank=self.temporal_rank,
-        )
+        self.use_multiscale_projection = use_multiscale_projection
+        self.use_adaptive_path_fusion = use_adaptive_path_fusion
+        if use_multiscale_projection:
+            self.horizon_projection = MultiScaleTemporalProjection(
+                input_length=input_length,
+                output_length=pred_length,
+                feature_dim=hidden_dim,
+                rank=self.temporal_rank,
+                factors=multiscale_factors,
+            )
+        else:
+            self.horizon_projection = LowRankTemporalProjection(
+                input_length=input_length,
+                output_length=pred_length,
+                feature_dim=hidden_dim,
+                rank=self.temporal_rank,
+            )
         self.context_norm = nn.LayerNorm(hidden_dim)
         self.context_dropout = nn.Dropout(dropout)
         self.output_projection = nn.Linear(hidden_dim, output_dim)
+        if use_multiscale_projection:
+            self.multiscale_factors = multiscale_factors
+        else:
+            self.multiscale_factors = (1,)
 
         if use_linear_residual:
             residual_rank = (
@@ -195,9 +403,21 @@ class DirectForecastHead(nn.Module):
                 output_dim=output_dim,
                 trend_window=trend_window,
             )
+            if use_adaptive_path_fusion:
+                self.path_fusion = AdaptivePathFusion(
+                    input_length=input_length,
+                    pred_length=pred_length,
+                    input_dim=input_dim,
+                    output_dim=output_dim,
+                    hidden_dim=max(8, min(hidden_dim, 64)),
+                    dropout=dropout,
+                )
+            else:
+                self.register_module("path_fusion", None)
         else:
             self.register_module("linear_residual", None)
             self.register_module("trend_residual", None)
+            self.register_module("path_fusion", None)
 
     def forward(
         self,
@@ -241,17 +461,74 @@ class DirectForecastHead(nn.Module):
             )
             trend_scale = torch.tanh(self.trend_residual.trend_scale_raw)
 
+        if self.path_fusion is None:
+            normalized_prediction = direct + residual
+            path_weights = torch.ones(
+                direct.size(0),
+                direct.size(1),
+                direct.size(2),
+                2,
+                device=direct.device,
+                dtype=direct.dtype,
+            )
+            direct_weight_mean = torch.ones(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            residual_weight_mean = torch.ones(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            path_weight_std = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            adaptive_correction_abs_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+        else:
+            fusion = self.path_fusion(
+                direct,
+                residual,
+                normalized_input,
+                target_indices,
+            )
+            normalized_prediction = fusion["prediction"]
+            path_weights = fusion["weights"]
+            direct_weight_mean = fusion["direct_weight_mean"]
+            residual_weight_mean = fusion["residual_weight_mean"]
+            path_weight_std = fusion["path_weight_std"]
+            adaptive_correction_abs_mean = fusion[
+                "adaptive_correction_abs_mean"
+            ]
+
+        if isinstance(self.horizon_projection, MultiScaleTemporalProjection):
+            scale_gates = self.horizon_projection.gate_values()
+            scale_gate_mean = scale_gates.detach().mean()
+            scale_gate_std = scale_gates.detach().std(unbiased=False)
+        else:
+            scale_gate_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            scale_gate_std = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+
         return {
             "direct": direct,
             "residual": residual,
             "trend_scale": trend_scale,
+            "scale_gate_mean": scale_gate_mean,
+            "scale_gate_std": scale_gate_std,
+            "direct_weight_mean": direct_weight_mean,
+            "residual_weight_mean": residual_weight_mean,
+            "path_weight_std": path_weight_std,
+            "path_weights": path_weights,
+            "adaptive_correction_abs_mean": adaptive_correction_abs_mean,
             "direct_abs_mean": direct.detach().abs().mean(),
             "residual_abs_mean": residual.detach().abs().mean(),
             "residual_to_direct_ratio": (
                 residual.detach().abs().mean()
                 / direct.detach().abs().mean().clamp_min(1e-6)
             ),
-            "normalized_prediction": direct + residual,
+            "normalized_prediction": normalized_prediction,
         }
 
 
@@ -285,6 +562,9 @@ class HyperbolicTSF(nn.Module):
         trend_window: int | None = None,
         hgcn_residual_init: float | None = None,
         use_time_identity: bool = False,
+        use_multiscale_projection: bool = False,
+        multiscale_factors: tuple[int, ...] = (1, 2, 4),
+        use_adaptive_path_fusion: bool = False,
     ) -> None:
         super().__init__()
         if input_length <= 0 or pred_length <= 0:
@@ -353,6 +633,9 @@ class HyperbolicTSF(nn.Module):
             use_linear_residual=use_linear_residual,
             temporal_rank=temporal_rank,
             trend_window=trend_window,
+            use_multiscale_projection=use_multiscale_projection,
+            multiscale_factors=multiscale_factors,
+            use_adaptive_path_fusion=use_adaptive_path_fusion,
         )
 
     def forward(

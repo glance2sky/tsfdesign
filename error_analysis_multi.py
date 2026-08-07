@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tsf_data import DataConfig, build_data_bundle
 from hypertsf_layers import HyperbolicTSF
+from error_analysis_utils import decompose_head_forecasts
 
 DATASET = "ETTh1"
 DATA_PATH = "datasets/ETT-small/ETTh1.csv"
@@ -82,17 +84,28 @@ def train_best(pred_len, num_variables, train_loader, val_loader):
 @torch.no_grad()
 def analyze_horizon(model, test_loader, pred_len, variable_names):
     model.eval()
-    preds, trues, inputs, directs, residuals = [], [], [], [], []
+    preds, trues, inputs = [], [], []
+    direct_forecasts, residual_forecasts = [], []
+    start_indices = []
     for batch in test_loader:
         x, y = batch["x"].to(DEVICE), batch["y"].to(DEVICE)
         out = model(x, return_aux=True)
         preds.append(out["prediction"].cpu())
         trues.append(y.cpu())
         inputs.append(x.cpu())
-        directs.append(out["head"]["direct"].cpu())
-        residuals.append(out["head"]["residual"].cpu())
+        components = decompose_head_forecasts(
+            model,
+            out["head"]["direct"],
+            out["head"]["residual"],
+            out["revin_state"],
+        )
+        direct_forecasts.append(components["direct_forecast"].cpu())
+        residual_forecasts.append(components["residual_forecast"].cpu())
+        start_indices.append(batch["start_idx"].cpu())
     preds = torch.cat(preds); trues = torch.cat(trues); inputs = torch.cat(inputs)
-    directs = torch.cat(directs); residuals = torch.cat(residuals)
+    directs = torch.cat(direct_forecasts)
+    residuals = torch.cat(residual_forecasts)
+    start_indices = torch.cat(start_indices).numpy()
 
     errors = (preds - trues) ** 2
     n = preds.size(0)
@@ -129,22 +142,28 @@ def analyze_horizon(model, test_loader, pred_len, variable_names):
     best_indices = sample_mse.argsort()[:50].tolist()
 
     # Gap analysis for worst samples
-    worst_gaps = sorted([worst_indices[i+1] - worst_indices[i] for i in range(len(worst_indices)-1)])
-    best_gaps = sorted([best_indices[i+1] - best_indices[i] for i in range(len(best_indices)-1)])
+    worst_starts = np.sort(start_indices[worst_indices])
+    best_starts = np.sort(start_indices[best_indices])
+    worst_gaps = np.diff(worst_starts)
+    best_gaps = np.diff(best_starts)
     median_worst_gap = worst_gaps[len(worst_gaps)//2]
     median_best_gap = best_gaps[len(best_gaps)//2]
 
     # Hour-of-day analysis (ETTh1 is hourly)
-    # start_idx maps to hours from 2016-07-01
-    start_offsets = list(range(n))
-    hours_of_day = [(idx + SEQ_LEN) % 24 for idx in start_offsets]
+    # Group by the actual forecast-start timestamp, not test-loader position.
+    frame_timestamps = pd.to_datetime(
+        getattr(test_loader.dataset, "time_values", None)
+    )
+    forecast_indices = start_indices + SEQ_LEN
+    forecast_timestamps = frame_timestamps[forecast_indices]
+    hours_of_day = forecast_timestamps.hour.to_numpy()
     hour_errors = {}
     for i, h in enumerate(hours_of_day):
         hour_errors.setdefault(h, []).append(float(sample_mse[i]))
     hour_avg = {h: float(np.mean(v)) for h, v in hour_errors.items()}
 
     # Day-of-week (168 hours per week)
-    dows = [((idx + SEQ_LEN) // 24) % 7 for idx in start_offsets]
+    dows = forecast_timestamps.dayofweek.to_numpy()
     dow_errors = {}
     for i, d in enumerate(dows):
         dow_errors.setdefault(d, []).append(float(sample_mse[i]))

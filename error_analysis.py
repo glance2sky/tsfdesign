@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tsf_data import DataConfig, build_data_bundle
 from hypertsf_layers import HyperbolicTSF
+from error_analysis_utils import decompose_head_forecasts
 
 
 DATASET = "ETTh1"
@@ -127,7 +128,9 @@ def collect_errors(model, test_loader, pred_len, num_variables):
     model.eval()
 
     all_preds, all_trues, all_inputs = [], [], []
-    all_direct, all_residual, all_normalized_preds = [], [], []
+    all_direct_forecasts, all_residual_forecasts = [], []
+    all_direct_contributions, all_residual_contributions = [], []
+    all_bases, all_reconstructed_preds = [], []
     all_fusion_gates, all_var_weights = [], []
     all_start_indices = []
 
@@ -140,9 +143,24 @@ def collect_errors(model, test_loader, pred_len, num_variables):
         all_preds.append(out["prediction"].cpu())
         all_trues.append(y.cpu())
         all_inputs.append(x.cpu())
-        all_direct.append(out["head"]["direct"].cpu())
-        all_residual.append(out["head"]["residual"].cpu())
-        all_normalized_preds.append(out["prediction_normalized"].cpu() if "prediction_normalized" in out else torch.zeros(1))
+        components = decompose_head_forecasts(
+            model,
+            out["head"]["direct"],
+            out["head"]["residual"],
+            out["revin_state"],
+        )
+        all_direct_forecasts.append(components["direct_forecast"].cpu())
+        all_residual_forecasts.append(components["residual_forecast"].cpu())
+        all_direct_contributions.append(
+            components["direct_contribution"].cpu()
+        )
+        all_residual_contributions.append(
+            components["residual_contribution"].cpu()
+        )
+        all_bases.append(components["base_forecast"].cpu())
+        all_reconstructed_preds.append(
+            components["reconstructed_prediction"].cpu()
+        )
         all_fusion_gates.append(out["encoder"]["fusion_gate"].cpu())
         all_var_weights.append(out["encoder"]["variable_weights"].cpu())
         if "start_idx" in batch:
@@ -151,8 +169,12 @@ def collect_errors(model, test_loader, pred_len, num_variables):
     preds = torch.cat(all_preds, dim=0)
     trues = torch.cat(all_trues, dim=0)
     inputs = torch.cat(all_inputs, dim=0)
-    direct = torch.cat(all_direct, dim=0)
-    residual = torch.cat(all_residual, dim=0)
+    direct_forecast = torch.cat(all_direct_forecasts, dim=0)
+    residual_forecast = torch.cat(all_residual_forecasts, dim=0)
+    direct_contribution = torch.cat(all_direct_contributions, dim=0)
+    residual_contribution = torch.cat(all_residual_contributions, dim=0)
+    base_forecast = torch.cat(all_bases, dim=0)
+    reconstructed_prediction = torch.cat(all_reconstructed_preds, dim=0)
     fusion_gates = torch.cat(all_fusion_gates, dim=0)
     var_weights = torch.cat(all_var_weights, dim=0)
 
@@ -165,8 +187,12 @@ def collect_errors(model, test_loader, pred_len, num_variables):
         "preds": preds,
         "trues": trues,
         "inputs": inputs,
-        "direct": direct,
-        "residual": residual,
+        "direct_forecast": direct_forecast,
+        "residual_forecast": residual_forecast,
+        "direct_contribution": direct_contribution,
+        "residual_contribution": residual_contribution,
+        "base_forecast": base_forecast,
+        "reconstructed_prediction": reconstructed_prediction,
         "fusion_gates": fusion_gates,
         "var_weights": var_weights,
         "start_indices": start_indices,
@@ -178,8 +204,8 @@ def analyze_errors(data, pred_len, num_variables, variable_names):
     preds = data["preds"]
     trues = data["trues"]
     inputs = data["inputs"]
-    direct = data["direct"]
-    residual = data["residual"]
+    direct_forecast = data["direct_forecast"]
+    residual_forecast = data["residual_forecast"]
     fusion_gates = data["fusion_gates"]
     var_weights = data["var_weights"]
 
@@ -219,8 +245,8 @@ def analyze_errors(data, pred_len, num_variables, variable_names):
     sample_recent_vol = recent_vol.mean(dim=1)  # [N]
 
     # ---- 6. Direct vs residual path analysis ----
-    direct_errors = (direct - trues) ** 2
-    residual_errors = (residual - trues) ** 2
+    direct_errors = (direct_forecast - trues) ** 2
+    residual_errors = (residual_forecast - trues) ** 2
 
     # Which path is "winning" per sample
     direct_mse_per_sample = direct_errors.mean(dim=(1, 2))
@@ -439,9 +465,16 @@ def main():
 
     # Direct vs residual per variable
     print(f"\n  Direct vs Residual Path per Variable:")
+    reconstruction_error = (
+        data["reconstructed_prediction"] - data["preds"]
+    ).abs().max().item()
+    print(f"\n  Branch reconstruction max error: {reconstruction_error:.3e}")
+
+    # Direct and residual are now evaluated as standalone forecasts after
+    # valid RevIN denormalization, rather than in incompatible coordinates.
     for var_idx, name in enumerate(variable_names):
-        direct_var_mse = ((data["direct"][:, :, var_idx] - data["trues"][:, :, var_idx]) ** 2).mean().item()
-        residual_var_mse = ((data["residual"][:, :, var_idx] - data["trues"][:, :, var_idx]) ** 2).mean().item()
+        direct_var_mse = ((data["direct_forecast"][:, :, var_idx] - data["trues"][:, :, var_idx]) ** 2).mean().item()
+        residual_var_mse = ((data["residual_forecast"][:, :, var_idx] - data["trues"][:, :, var_idx]) ** 2).mean().item()
         pred_var_mse = ((data["preds"][:, :, var_idx] - data["trues"][:, :, var_idx]) ** 2).mean().item()
         print(f"    {name:>8}: direct_mse={direct_var_mse:.4f} residual_mse={residual_var_mse:.4f} combined_mse={pred_var_mse:.4f}")
 

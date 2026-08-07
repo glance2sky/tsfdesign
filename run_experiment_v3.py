@@ -8,6 +8,7 @@ This experiment uses the model's default configuration:
   - LocalTrendResidual active but trend_scale starts at 0
 
 This is effectively v1 + zero-initialized trend residual + diagnostics.
+The two error-driven forecast-head extensions below are opt-in.
 """
 
 from __future__ import annotations
@@ -44,6 +45,8 @@ MANIFOLD = "poincare"
 DROPOUT = 0.1
 USE_REVIN = True
 USE_LINEAR_RESIDUAL = True
+USE_MULTISCALE_PROJECTION = False
+USE_ADAPTIVE_PATH_FUSION = False
 
 # training
 BATCH_SIZE = 32
@@ -53,6 +56,7 @@ EPOCHS = 30
 PATIENCE = 5
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 NUM_WORKERS = 0
+RESULT_FILENAME = "experiment_results_v3.json"
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +108,9 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
         head_keys = [
             "trend_scale", "direct_abs_mean", "residual_abs_mean",
             "residual_to_direct_ratio",
+            "scale_gate_mean", "scale_gate_std",
+            "direct_weight_mean", "residual_weight_mean",
+            "path_weight_std", "adaptive_correction_abs_mean",
         ]
         for k in head_keys:
             if k in head:
@@ -144,6 +151,8 @@ def train_one(
         dropout=DROPOUT,
         use_revin=USE_REVIN,
         use_linear_residual=USE_LINEAR_RESIDUAL,
+        use_multiscale_projection=USE_MULTISCALE_PROJECTION,
+        use_adaptive_path_fusion=USE_ADAPTIVE_PATH_FUSION,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -248,6 +257,11 @@ def train_one(
     print(f"    direct_abs_mean    = {test_result.get('direct_abs_mean', 0):.4f}")
     print(f"    residual_abs_mean  = {test_result.get('residual_abs_mean', 0):.4f}")
     print(f"    residual/direct    = {test_result.get('residual_to_direct_ratio', 0):.4f}")
+    print(f"    scale_gate         = {test_result.get('scale_gate_mean', 0):.4f} ± "
+          f"{test_result.get('scale_gate_std', 0):.4f}")
+    print(f"    path_weights       = {test_result.get('direct_weight_mean', 0):.4f} / "
+          f"{test_result.get('residual_weight_mean', 0):.4f}")
+    print(f"    path_weight_std    = {test_result.get('path_weight_std', 0):.4f}")
 
     return {
         "pred_len": pred_len,
@@ -270,6 +284,15 @@ def main():
     print(f"seq_len={SEQ_LEN}, pred_len={PRED_LENGTHS}")
     print(f"model: manifold={MANIFOLD}, tangent_dim={TANGENT_DIM}, hidden_dim={HIDDEN_DIM}")
     print(f"       configuration: DEFAULT (v1-compatible, no low-rank, no time_identity)")
+    print(f"       multiscale_projection={USE_MULTISCALE_PROJECTION}, "
+          f"adaptive_path_fusion={USE_ADAPTIVE_PATH_FUSION}")
+    variant = "v3-default"
+    if USE_MULTISCALE_PROJECTION and USE_ADAPTIVE_PATH_FUSION:
+        variant = "v4-multiscale-adaptive"
+    elif USE_MULTISCALE_PROJECTION:
+        variant = "v4-multiscale"
+    elif USE_ADAPTIVE_PATH_FUSION:
+        variant = "v4-adaptive"
 
     results = []
 
@@ -337,21 +360,23 @@ def main():
                   f"{v2_mse:>8.4f}  {v2_change:>8}")
 
     # save results
-    out_path = Path(__file__).resolve().parent / "experiment_results_v3.json"
+    out_path = Path(__file__).resolve().parent / RESULT_FILENAME
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "dataset": DATASET,
                 "seq_len": SEQ_LEN,
-                "model": "HyperbolicTSF-v3-default",
+                "model": f"HyperbolicTSF-{variant}",
                 "manifold": MANIFOLD,
                 "tangent_dim": TANGENT_DIM,
                 "hidden_dim": HIDDEN_DIM,
-                "configuration": "default (v1-compatible)",
+                "configuration": variant,
                 "spatial_rank": None,
                 "temporal_rank": None,
                 "hgcn_residual_init": None,
                 "use_time_identity": False,
+                "use_multiscale_projection": USE_MULTISCALE_PROJECTION,
+                "use_adaptive_path_fusion": USE_ADAPTIVE_PATH_FUSION,
                 "results": results,
             },
             f,

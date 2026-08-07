@@ -105,3 +105,42 @@ def test_default_configuration_preserves_v1_capacity_and_disables_new_paths() ->
     output = model(torch.randn(2, 96, 7), return_aux=True)
     assert output["head"]["trend_scale"].item() == 0.0
     assert torch.isfinite(output["head"]["residual_to_direct_ratio"])
+    assert torch.allclose(
+        output["head"]["normalized_prediction"],
+        output["head"]["direct"] + output["head"]["residual"],
+    )
+
+
+def test_multiscale_and_adaptive_head_preserves_shapes_and_diagnostics() -> None:
+    model = HyperbolicTSF(
+        input_length=24,
+        pred_length=12,
+        num_variables=4,
+        tangent_dim=4,
+        hidden_dim=8,
+        manifold="poincare",
+        use_linear_residual=True,
+        use_multiscale_projection=True,
+        multiscale_factors=(1, 2, 4),
+        use_adaptive_path_fusion=True,
+    )
+    x = torch.randn(2, 24, 4, requires_grad=True)
+    output = model(x, return_aux=True)
+    head = output["head"]
+
+    assert output["prediction"].shape == (2, 12, 4)
+    assert head["path_weights"].shape == (2, 12, 4, 2)
+    assert head["scale_gate_mean"].item() == 0.0
+    assert torch.allclose(
+        head["path_weights"],
+        torch.ones_like(head["path_weights"]),
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        head["normalized_prediction"],
+        head["direct"] + head["residual"],
+        atol=1e-6,
+    )
+    output["prediction"].square().mean().backward()
+    assert x.grad is not None
+    assert torch.isfinite(x.grad).all()
