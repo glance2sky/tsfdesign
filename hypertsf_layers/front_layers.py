@@ -687,6 +687,260 @@ class HyperbolicTemporalHierarchy(nn.Module):
         return (entropy / maximum).mean()
 
 
+class RecursiveHyperbolicTemporalHierarchy(nn.Module):
+    """Recursive parent-child temporal hierarchy with shared hyperbolic blocks.
+
+    ``factors`` are per-level coarsening ratios. For example, ``(2, 2, 2)``
+    maps 96 fine nodes to 48, then 24, then 12 coarse nodes. The upward pass
+    uses one shared HGCN and a local sparse graph at every level. The
+    top-down pass broadcasts information through the fixed parent-child maps.
+    The downward projection is zero initialized, so the module is an exact
+    identity at initialization while its projection parameters still receive
+    gradients.
+    """
+
+    def __init__(
+        self,
+        space: ManifoldSpace,
+        input_length: int,
+        hidden_dim: int,
+        factors: tuple[int, ...] = (2, 2, 2),
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if input_length <= 0 or hidden_dim <= 0:
+            raise ValueError("input_length and hidden_dim must be positive")
+        if not factors or any(factor <= 1 for factor in factors):
+            raise ValueError(
+                "recursive temporal factors must be greater than 1"
+            )
+        self.space = space
+        self.input_length = input_length
+        self.hidden_dim = hidden_dim
+        self.factors = factors
+
+        self.assignments = []
+        self.local_adjacencies = []
+        child_length = input_length
+        for index, factor in enumerate(factors):
+            parent_length = (child_length + factor - 1) // factor
+            assignment = torch.zeros(parent_length, child_length)
+            for child_index in range(child_length):
+                parent_index = min(child_index // factor, parent_length - 1)
+                assignment[parent_index, child_index] = 1.0
+            assignment = assignment / assignment.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1.0)
+            adjacency = self._local_adjacency(parent_length)
+            assignment_name = f"assignment_{index}"
+            adjacency_name = f"local_adjacency_{index}"
+            self.register_buffer(assignment_name, assignment)
+            self.register_buffer(adjacency_name, adjacency)
+            self.assignments.append(assignment_name)
+            self.local_adjacencies.append(adjacency_name)
+            child_length = parent_length
+
+        self.shared_hgcn = _HyperbolicGraphConvolution(
+            space,
+            hidden_dim,
+            dropout,
+        )
+        self.shared_down_projection = _HyperbolicNeuralProjection(
+            space,
+            hidden_dim,
+            hidden_dim,
+            dropout,
+        )
+        nn.init.zeros_(self.shared_down_projection.weight)
+        nn.init.zeros_(self.shared_down_projection.bias)
+        self.global_projection = _HyperbolicNeuralProjection(
+            space,
+            hidden_dim,
+            hidden_dim,
+            dropout,
+        )
+        self.temperature_logit = nn.Parameter(torch.zeros(()))
+        self.graph_mix_logit = nn.Parameter(torch.tensor(-1.0))
+        self.hierarchy_mix_raw = nn.Parameter(torch.zeros(()))
+
+    def forward(
+        self,
+        temporal_points: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if temporal_points.ndim != 3:
+            raise ValueError(
+                "temporal_points must have shape [batch, time, hidden_dim]"
+            )
+        batch, length, hidden_dim = temporal_points.shape
+        if (length, hidden_dim) != (self.input_length, self.hidden_dim):
+            raise ValueError(
+                "Expected temporal shape "
+                f"[B, {self.input_length}, {self.hidden_dim}], "
+                f"got {tuple(temporal_points.shape)}"
+            )
+
+        level_points = [temporal_points]
+        level_contributions = []
+        graph_entropies = []
+        graph_mix_values = []
+        current_points = temporal_points
+
+        for assignment_name, adjacency_name in zip(
+            self.assignments,
+            self.local_adjacencies,
+        ):
+            assignment = getattr(self, assignment_name).to(
+                device=temporal_points.device,
+                dtype=temporal_points.dtype,
+            )
+            local_adjacency = getattr(self, adjacency_name).to(
+                device=temporal_points.device,
+                dtype=temporal_points.dtype,
+            )
+            current_tangent = self.space.logmap0(current_points)
+            pooled_tangent = torch.einsum(
+                "pc,bch->bph",
+                assignment,
+                current_tangent,
+            )
+            pooled_points = self.space.expmap0(pooled_tangent)
+            distance = self.space.pairwise_sqdist(pooled_points)
+            dynamic = self._distance_graph(
+                distance,
+                self.temperature_logit,
+            )
+            mix = torch.sigmoid(self.graph_mix_logit)
+            graph = (1.0 - mix) * local_adjacency.unsqueeze(0) + (
+                mix * dynamic
+            )
+            graph = graph / graph.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1e-8)
+            current_points = self.shared_hgcn(pooled_points, graph)
+            level_points.append(current_points)
+            graph_entropies.append(self._normalized_entropy(graph))
+            graph_mix_values.append(mix.detach())
+            level_contributions.append(
+                self.space.logmap0(current_points).detach().abs().mean()
+            )
+
+        top_tangent = self.space.logmap0(level_points[-1])
+        global_tangent = top_tangent.mean(dim=1)
+        global_message = self.global_projection(global_tangent)
+        global_tangent = self.space.logmap0(global_message)
+        down_points = self.space.expmap0(
+            top_tangent + global_tangent.unsqueeze(1)
+        )
+
+        for level_index in range(len(self.assignments) - 1, -1, -1):
+            assignment = getattr(
+                self,
+                self.assignments[level_index],
+            ).to(
+                device=temporal_points.device,
+                dtype=temporal_points.dtype,
+            )
+            child_base = level_points[level_index]
+            parent_tangent = self.space.logmap0(down_points)
+            broadcast = torch.einsum(
+                "pc,bph->bch",
+                assignment,
+                parent_tangent,
+            )
+            message = self.shared_down_projection(
+                self.space.expmap0(broadcast)
+            )
+            child_tangent = self.space.logmap0(child_base) + self.space.logmap0(
+                message
+            )
+            down_points = self.space.expmap0(child_tangent)
+
+        fine_tangent = self.space.logmap0(temporal_points)
+        updated_tangent = self.space.logmap0(down_points)
+        correction = updated_tangent - fine_tangent
+        hierarchy_mix = torch.exp(
+            0.25 * torch.tanh(self.hierarchy_mix_raw)
+        )
+        updated_points = self.space.expmap0(
+            fine_tangent + hierarchy_mix * correction
+        )
+        level_contributions_tensor = torch.stack(level_contributions)
+        graph_entropies_tensor = torch.stack(graph_entropies)
+        graph_mix_tensor = torch.stack(graph_mix_values)
+        return updated_points, {
+            "recursive_temporal_hierarchy_mix": hierarchy_mix,
+            "recursive_temporal_hierarchy_contribution": (
+                correction.detach().abs().mean()
+            ),
+            "recursive_temporal_level_contribution": (
+                level_contributions_tensor
+            ),
+            "recursive_temporal_level_contribution_mean": (
+                level_contributions_tensor.mean()
+            ),
+            "recursive_temporal_level_contribution_std": (
+                level_contributions_tensor.std(unbiased=False)
+            ),
+            "recursive_temporal_level_graph_entropy": graph_entropies_tensor,
+            "recursive_temporal_level_graph_entropy_mean": (
+                graph_entropies_tensor.mean()
+            ),
+            "recursive_temporal_level_graph_entropy_std": (
+                graph_entropies_tensor.std(unbiased=False)
+            ),
+            "recursive_temporal_level_graph_mix": graph_mix_tensor,
+            "recursive_temporal_level_graph_mix_mean": graph_mix_tensor.mean(),
+            "recursive_temporal_hierarchy_fine_norm": (
+                fine_tangent.detach().norm(dim=-1).mean()
+            ),
+            "recursive_temporal_hierarchy_global_norm": (
+                global_tangent.detach().norm(dim=-1).mean()
+            ),
+            "recursive_temporal_hierarchy_depth": torch.tensor(
+                len(self.factors),
+                device=temporal_points.device,
+                dtype=temporal_points.dtype,
+            ),
+        }
+
+    @staticmethod
+    def _local_adjacency(size: int) -> torch.Tensor:
+        adjacency = torch.eye(size)
+        if size > 1:
+            adjacency += torch.diag(torch.ones(size - 1), diagonal=1)
+            adjacency += torch.diag(torch.ones(size - 1), diagonal=-1)
+        return adjacency / adjacency.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
+    def _distance_graph(
+        self,
+        distance: torch.Tensor,
+        temperature_logit: torch.Tensor,
+    ) -> torch.Tensor:
+        temperature = F.softplus(temperature_logit) + 1e-4
+        graph = F.softmax(-distance / temperature, dim=-1)
+        identity = torch.eye(
+            distance.size(-1),
+            device=distance.device,
+            dtype=distance.dtype,
+        ).unsqueeze(0)
+        graph = 0.5 * (graph + identity)
+        return graph / graph.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
+    @staticmethod
+    def _normalized_entropy(values: torch.Tensor) -> torch.Tensor:
+        entropy = -(
+            values.clamp_min(1e-8) * values.clamp_min(1e-8).log()
+        ).sum(dim=-1)
+        maximum = torch.log(
+            torch.tensor(
+                values.size(-1),
+                device=values.device,
+                dtype=values.dtype,
+            )
+        ).clamp_min(1e-8)
+        return (entropy / maximum).mean()
+
+
 class DualGraphHyperbolicLayer(nn.Module):
     """Layer 3: parallel temporal and variable HNN/HGCN branches.
 
@@ -713,6 +967,8 @@ class DualGraphHyperbolicLayer(nn.Module):
         variable_hierarchy_groups: int = 3,
         use_temporal_hierarchy: bool = False,
         temporal_hierarchy_factors: tuple[int, ...] = (2, 4, 8),
+        use_recursive_temporal_hierarchy: bool = False,
+        recursive_temporal_factors: tuple[int, ...] = (2, 2, 2),
     ) -> None:
         super().__init__()
         if input_length <= 0 or num_variables <= 0:
@@ -795,6 +1051,18 @@ class DualGraphHyperbolicLayer(nn.Module):
             )
         else:
             self.register_module("temporal_hierarchy", None)
+        if use_recursive_temporal_hierarchy:
+            self.recursive_temporal_hierarchy = (
+                RecursiveHyperbolicTemporalHierarchy(
+                    self.temporal_space,
+                    input_length=input_length,
+                    hidden_dim=hidden_dim,
+                    factors=recursive_temporal_factors,
+                    dropout=dropout,
+                )
+            )
+        else:
+            self.register_module("recursive_temporal_hierarchy", None)
 
     def forward(
         self,
@@ -895,6 +1163,45 @@ class DualGraphHyperbolicLayer(nn.Module):
                 self.temporal_hierarchy(temporal_hidden)
             )
 
+        if self.recursive_temporal_hierarchy is None:
+            recursive_temporal_hierarchy_diagnostics = {
+                "recursive_temporal_hierarchy_mix": temporal_graph.new_zeros(
+                    ()
+                ),
+                "recursive_temporal_hierarchy_contribution": (
+                    temporal_graph.new_zeros(())
+                ),
+                "recursive_temporal_level_contribution_mean": (
+                    temporal_graph.new_zeros(())
+                ),
+                "recursive_temporal_level_contribution_std": (
+                    temporal_graph.new_zeros(())
+                ),
+                "recursive_temporal_level_graph_entropy_mean": (
+                    temporal_graph.new_zeros(())
+                ),
+                "recursive_temporal_level_graph_entropy_std": (
+                    temporal_graph.new_zeros(())
+                ),
+                "recursive_temporal_level_graph_mix_mean": (
+                    temporal_graph.new_zeros(())
+                ),
+                "recursive_temporal_hierarchy_fine_norm": (
+                    temporal_graph.new_zeros(())
+                ),
+                "recursive_temporal_hierarchy_global_norm": (
+                    temporal_graph.new_zeros(())
+                ),
+                "recursive_temporal_hierarchy_depth": (
+                    temporal_graph.new_zeros(())
+                ),
+            }
+        else:
+            (
+                temporal_hidden,
+                recursive_temporal_hierarchy_diagnostics,
+            ) = self.recursive_temporal_hierarchy(temporal_hidden)
+
         spatial_tangent = self.spatial_space.logmap0(spatial_hidden)
         temporal_tangent = self.temporal_space.logmap0(temporal_hidden)
         spatial_tangent = self.spatial_output_norm(spatial_tangent)
@@ -955,6 +1262,7 @@ class DualGraphHyperbolicLayer(nn.Module):
             ),
             **hierarchy_diagnostics,
             **temporal_hierarchy_diagnostics,
+            **recursive_temporal_hierarchy_diagnostics,
         }
 
     def _learned_graph(

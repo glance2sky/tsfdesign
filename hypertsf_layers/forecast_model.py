@@ -1339,6 +1339,8 @@ class HyperbolicTSF(nn.Module):
         variable_hierarchy_groups: int = 3,
         use_temporal_hierarchy: bool = False,
         temporal_hierarchy_factors: tuple[int, ...] = (2, 4, 8),
+        use_recursive_temporal_hierarchy: bool = False,
+        recursive_temporal_factors: tuple[int, ...] = (2, 2, 2),
     ) -> None:
         super().__init__()
         if input_length <= 0 or pred_length <= 0:
@@ -1400,6 +1402,8 @@ class HyperbolicTSF(nn.Module):
             variable_hierarchy_groups=variable_hierarchy_groups,
             use_temporal_hierarchy=use_temporal_hierarchy,
             temporal_hierarchy_factors=temporal_hierarchy_factors,
+            use_recursive_temporal_hierarchy=use_recursive_temporal_hierarchy,
+            recursive_temporal_factors=recursive_temporal_factors,
         )
         self.forecast_head = DirectForecastHead(
             input_length=input_length,

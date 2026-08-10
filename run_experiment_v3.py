@@ -62,6 +62,8 @@ USE_VARIABLE_HIERARCHY = False
 VARIABLE_HIERARCHY_GROUPS = 3
 USE_TEMPORAL_HIERARCHY = False
 TEMPORAL_HIERARCHY_FACTORS = (2, 4, 8)
+USE_RECURSIVE_TEMPORAL_HIERARCHY = False
+RECURSIVE_TEMPORAL_FACTORS = (2, 2, 2)
 
 # training
 BATCH_SIZE = 32
@@ -123,6 +125,16 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
             "temporal_hierarchy_contribution",
             "temporal_hierarchy_fine_norm",
             "temporal_hierarchy_global_norm",
+            "recursive_temporal_hierarchy_mix",
+            "recursive_temporal_hierarchy_contribution",
+            "recursive_temporal_level_contribution_mean",
+            "recursive_temporal_level_contribution_std",
+            "recursive_temporal_level_graph_entropy_mean",
+            "recursive_temporal_level_graph_entropy_std",
+            "recursive_temporal_level_graph_mix_mean",
+            "recursive_temporal_hierarchy_fine_norm",
+            "recursive_temporal_hierarchy_global_norm",
+            "recursive_temporal_hierarchy_depth",
         ]
         for k in scalar_keys:
             if k in enc:
@@ -205,6 +217,8 @@ def train_one(
         variable_hierarchy_groups=VARIABLE_HIERARCHY_GROUPS,
         use_temporal_hierarchy=USE_TEMPORAL_HIERARCHY,
         temporal_hierarchy_factors=TEMPORAL_HIERARCHY_FACTORS,
+        use_recursive_temporal_hierarchy=USE_RECURSIVE_TEMPORAL_HIERARCHY,
+        recursive_temporal_factors=RECURSIVE_TEMPORAL_FACTORS,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -346,7 +360,10 @@ def main():
           f"variable_hierarchy={USE_VARIABLE_HIERARCHY} "
           f"(groups={VARIABLE_HIERARCHY_GROUPS}), "
           f"temporal_hierarchy={USE_TEMPORAL_HIERARCHY} "
-          f"(factors={TEMPORAL_HIERARCHY_FACTORS})")
+          f"(factors={TEMPORAL_HIERARCHY_FACTORS}), "
+          f"recursive_temporal_hierarchy="
+          f"{USE_RECURSIVE_TEMPORAL_HIERARCHY} "
+          f"(factors={RECURSIVE_TEMPORAL_FACTORS})")
     variant = "v3-default"
     if USE_MULTISCALE_PROJECTION and USE_ADAPTIVE_PATH_FUSION:
         variant = "v4-multiscale-adaptive"
@@ -368,6 +385,8 @@ def main():
         variant = f"{variant}-variable-hierarchy"
     if USE_TEMPORAL_HIERARCHY:
         variant = f"{variant}-temporal-hierarchy"
+    if USE_RECURSIVE_TEMPORAL_HIERARCHY:
+        variant = f"{variant}-recursive-temporal-hierarchy"
 
     results = []
 
@@ -475,6 +494,10 @@ def main():
                 "variable_hierarchy_groups": VARIABLE_HIERARCHY_GROUPS,
                 "use_temporal_hierarchy": USE_TEMPORAL_HIERARCHY,
                 "temporal_hierarchy_factors": TEMPORAL_HIERARCHY_FACTORS,
+                "use_recursive_temporal_hierarchy": (
+                    USE_RECURSIVE_TEMPORAL_HIERARCHY
+                ),
+                "recursive_temporal_factors": RECURSIVE_TEMPORAL_FACTORS,
                 "results": results,
             },
             f,

@@ -2,6 +2,7 @@
 
 from .front_layers import (
     DualGraphHyperbolicLayer,
+    RecursiveHyperbolicTemporalHierarchy,
     HyperbolicTemporalHierarchy,
     HyperbolicVariableHierarchy,
     ManifoldEmbedding,
@@ -15,6 +16,7 @@ __all__ = [
     "DualGraphHyperbolicLayer",
     "HyperbolicVariableHierarchy",
     "HyperbolicTemporalHierarchy",
+    "RecursiveHyperbolicTemporalHierarchy",
     "HyperbolicTSF",
     "ManifoldEmbedding",
     "RevIN",

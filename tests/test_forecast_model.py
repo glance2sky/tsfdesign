@@ -364,3 +364,42 @@ def test_v8_temporal_hierarchy_supports_long_horizon_and_has_gradients() -> None
     child_grad = hierarchy.levels[0]["child_projection"].weight.grad
     assert child_grad is not None
     assert child_grad.abs().sum().item() > 0.0
+
+
+def test_v8c_recursive_temporal_hierarchy_is_identity_and_recursive() -> None:
+    model = HyperbolicTSF(
+        input_length=96,
+        pred_length=720,
+        num_variables=7,
+        tangent_dim=8,
+        hidden_dim=16,
+        manifold="poincare",
+        use_linear_residual=True,
+        use_adaptive_path_fusion=True,
+        use_path_amplitude_calibration=True,
+        use_recursive_temporal_hierarchy=True,
+        recursive_temporal_factors=(2, 2, 2),
+    )
+    x = torch.randn(2, 96, 7, requires_grad=True)
+    output = model(x, return_aux=True)
+    encoder = output["encoder"]
+    hierarchy = model.graph_encoder.recursive_temporal_hierarchy
+
+    assert output["prediction"].shape == (2, 720, 7)
+    assert torch.isfinite(output["prediction"]).all()
+    assert encoder["recursive_temporal_hierarchy_depth"].item() == 3.0
+    assert encoder["recursive_temporal_hierarchy_mix"].item() == 1.0
+    assert encoder["recursive_temporal_hierarchy_contribution"].item() < 1e-6
+    assert [
+        tuple(getattr(hierarchy, name).shape)
+        for name in hierarchy.assignments
+    ] == [(48, 96), (24, 48), (12, 24)]
+    assert [
+        tuple(getattr(hierarchy, name).shape)
+        for name in hierarchy.local_adjacencies
+    ] == [(48, 48), (24, 24), (12, 12)]
+
+    output["prediction"].square().mean().backward()
+    down_grad = hierarchy.shared_down_projection.weight.grad
+    assert down_grad is not None
+    assert down_grad.abs().sum().item() > 0.0
