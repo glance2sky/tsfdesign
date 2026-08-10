@@ -60,6 +60,8 @@ EXPLICIT_PERIODS = (12, 24, 48)
 EXPLICIT_PERIODIC_MAX_AMPLITUDE = 0.25
 USE_VARIABLE_HIERARCHY = False
 VARIABLE_HIERARCHY_GROUPS = 3
+USE_TEMPORAL_HIERARCHY = False
+TEMPORAL_HIERARCHY_FACTORS = (2, 4, 8)
 
 # training
 BATCH_SIZE = 32
@@ -117,6 +119,10 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
             "group_graph_mix", "hierarchy_mix",
             "hierarchy_contribution", "leaf_tangent_norm",
             "group_tangent_norm", "global_tangent_norm",
+            "temporal_hierarchy_mix",
+            "temporal_hierarchy_contribution",
+            "temporal_hierarchy_fine_norm",
+            "temporal_hierarchy_global_norm",
         ]
         for k in scalar_keys:
             if k in enc:
@@ -197,6 +203,8 @@ def train_one(
         explicit_periodic_max_amplitude=EXPLICIT_PERIODIC_MAX_AMPLITUDE,
         use_variable_hierarchy=USE_VARIABLE_HIERARCHY,
         variable_hierarchy_groups=VARIABLE_HIERARCHY_GROUPS,
+        use_temporal_hierarchy=USE_TEMPORAL_HIERARCHY,
+        temporal_hierarchy_factors=TEMPORAL_HIERARCHY_FACTORS,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -336,7 +344,9 @@ def main():
           f"trend_difference_residual={USE_TREND_DIFFERENCE_RESIDUAL}, "
           f"explicit_periodic_residual={USE_EXPLICIT_PERIODIC_RESIDUAL}, "
           f"variable_hierarchy={USE_VARIABLE_HIERARCHY} "
-          f"(groups={VARIABLE_HIERARCHY_GROUPS})")
+          f"(groups={VARIABLE_HIERARCHY_GROUPS}), "
+          f"temporal_hierarchy={USE_TEMPORAL_HIERARCHY} "
+          f"(factors={TEMPORAL_HIERARCHY_FACTORS})")
     variant = "v3-default"
     if USE_MULTISCALE_PROJECTION and USE_ADAPTIVE_PATH_FUSION:
         variant = "v4-multiscale-adaptive"
@@ -356,6 +366,8 @@ def main():
         variant = f"{variant}-explicit-periodic"
     if USE_VARIABLE_HIERARCHY:
         variant = f"{variant}-variable-hierarchy"
+    if USE_TEMPORAL_HIERARCHY:
+        variant = f"{variant}-temporal-hierarchy"
 
     results = []
 
@@ -461,6 +473,8 @@ def main():
                 ),
                 "use_variable_hierarchy": USE_VARIABLE_HIERARCHY,
                 "variable_hierarchy_groups": VARIABLE_HIERARCHY_GROUPS,
+                "use_temporal_hierarchy": USE_TEMPORAL_HIERARCHY,
+                "temporal_hierarchy_factors": TEMPORAL_HIERARCHY_FACTORS,
                 "results": results,
             },
             f,

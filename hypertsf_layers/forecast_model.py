@@ -1337,6 +1337,8 @@ class HyperbolicTSF(nn.Module):
         explicit_periodic_max_amplitude: float = 0.25,
         use_variable_hierarchy: bool = False,
         variable_hierarchy_groups: int = 3,
+        use_temporal_hierarchy: bool = False,
+        temporal_hierarchy_factors: tuple[int, ...] = (2, 4, 8),
     ) -> None:
         super().__init__()
         if input_length <= 0 or pred_length <= 0:
@@ -1396,6 +1398,8 @@ class HyperbolicTSF(nn.Module):
             hgcn_residual_init=hgcn_residual_init,
             use_variable_hierarchy=use_variable_hierarchy,
             variable_hierarchy_groups=variable_hierarchy_groups,
+            use_temporal_hierarchy=use_temporal_hierarchy,
+            temporal_hierarchy_factors=temporal_hierarchy_factors,
         )
         self.forecast_head = DirectForecastHead(
             input_length=input_length,

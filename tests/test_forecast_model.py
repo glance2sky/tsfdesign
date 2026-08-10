@@ -331,3 +331,36 @@ def test_v8_variable_hierarchy_is_identity_but_trainable_at_initialization() -> 
     gate_grad = hierarchy.hierarchy_mix_raw.grad
     assert gate_grad is not None
     assert gate_grad.abs().sum().item() > 0.0
+
+
+def test_v8_temporal_hierarchy_supports_long_horizon_and_has_gradients() -> None:
+    model = HyperbolicTSF(
+        input_length=96,
+        pred_length=720,
+        num_variables=7,
+        tangent_dim=8,
+        hidden_dim=16,
+        manifold="poincare",
+        use_linear_residual=True,
+        use_adaptive_path_fusion=True,
+        use_path_amplitude_calibration=True,
+        use_temporal_hierarchy=True,
+        temporal_hierarchy_factors=(2, 4, 8),
+    )
+    x = torch.randn(2, 96, 7, requires_grad=True)
+    output = model(x, return_aux=True)
+    encoder = output["encoder"]
+
+    assert output["prediction"].shape == (2, 720, 7)
+    assert torch.isfinite(output["prediction"]).all()
+    assert encoder["temporal_hierarchy_mix"].item() == 1.0
+    assert encoder["temporal_hierarchy_contribution"].item() == 0.0
+    assert encoder["temporal_level_contribution"].shape == (3,)
+    assert encoder["temporal_level_graph_entropy"].shape == (3,)
+    assert encoder["temporal_level_graph_mix"].shape == (3,)
+
+    output["prediction"].square().mean().backward()
+    hierarchy = model.graph_encoder.temporal_hierarchy
+    child_grad = hierarchy.levels[0]["child_projection"].weight.grad
+    assert child_grad is not None
+    assert child_grad.abs().sum().item() > 0.0

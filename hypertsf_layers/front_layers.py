@@ -456,6 +456,237 @@ class HyperbolicVariableHierarchy(nn.Module):
         return (entropy / maximum).mean()
 
 
+class HyperbolicTemporalHierarchy(nn.Module):
+    """Fixed multi-resolution temporal hierarchy on a hyperbolic manifold.
+
+    Unlike the variable hierarchy, temporal membership is determined by
+    position and therefore does not suffer from assignment symmetry. Each
+    level pools contiguous time nodes, performs manifold graph propagation,
+    adds a global context, and broadcasts a bounded correction back to the
+    fine time nodes.
+    """
+
+    def __init__(
+        self,
+        space: ManifoldSpace,
+        input_length: int,
+        hidden_dim: int,
+        factors: tuple[int, ...] = (2, 4, 8),
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if input_length <= 0 or hidden_dim <= 0:
+            raise ValueError("input_length and hidden_dim must be positive")
+        if not factors or any(factor <= 1 for factor in factors):
+            raise ValueError("temporal hierarchy factors must be greater than 1")
+        if len(set(factors)) != len(factors):
+            raise ValueError("temporal hierarchy factors must be unique")
+        self.input_length = input_length
+        self.hidden_dim = hidden_dim
+        self.factors = factors
+        self.space = space
+        self.levels = nn.ModuleList()
+        self.graph_logits = nn.ParameterList()
+        self.temperature_logits = nn.ParameterList()
+        self.graph_mix_logits = nn.ParameterList()
+        self.assignments = []
+
+        for index, factor in enumerate(factors):
+            group_count = (input_length + factor - 1) // factor
+            assignment = torch.zeros(group_count, input_length)
+            for time_index in range(input_length):
+                group_index = min(time_index // factor, group_count - 1)
+                assignment[group_index, time_index] = 1.0
+            assignment = assignment / assignment.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1.0)
+            self.register_buffer(f"assignment_{index}", assignment)
+            self.assignments.append(f"assignment_{index}")
+            self.levels.append(
+                nn.ModuleDict(
+                    {
+                        "hgcn": _HyperbolicGraphConvolution(
+                            space,
+                            hidden_dim,
+                            dropout,
+                        ),
+                        "projection": _HyperbolicNeuralProjection(
+                            space,
+                            hidden_dim,
+                            hidden_dim,
+                            dropout,
+                        ),
+                        "child_projection": _HyperbolicNeuralProjection(
+                            space,
+                            hidden_dim,
+                            hidden_dim,
+                            dropout,
+                        ),
+                    }
+                )
+            )
+            self.graph_logits.append(
+                nn.Parameter(torch.zeros(group_count, group_count))
+            )
+            self.temperature_logits.append(nn.Parameter(torch.zeros(())))
+            self.graph_mix_logits.append(
+                nn.Parameter(torch.tensor(-1.0))
+            )
+            nn.init.zeros_(self.levels[-1]["child_projection"].weight)
+            nn.init.zeros_(self.levels[-1]["child_projection"].bias)
+
+        self.global_projection = _HyperbolicNeuralProjection(
+            space,
+            hidden_dim,
+            hidden_dim,
+            dropout,
+        )
+        nn.init.zeros_(self.global_projection.weight)
+        nn.init.zeros_(self.global_projection.bias)
+        self.hierarchy_mix_raw = nn.Parameter(torch.zeros(()))
+
+    def forward(
+        self,
+        temporal_points: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if temporal_points.ndim != 3:
+            raise ValueError(
+                "temporal_points must have shape [batch, time, hidden_dim]"
+            )
+        batch, length, hidden_dim = temporal_points.shape
+        if (length, hidden_dim) != (self.input_length, self.hidden_dim):
+            raise ValueError(
+                "Expected temporal shape "
+                f"[B, {self.input_length}, {self.hidden_dim}], "
+                f"got {tuple(temporal_points.shape)}"
+            )
+
+        fine_tangent = self.space.logmap0(temporal_points)
+        corrections = []
+        graph_entropies = []
+        graph_mixes = []
+        level_contributions = []
+        current_global = fine_tangent.mean(dim=1)
+
+        for level_index, level in enumerate(self.levels):
+            assignment = getattr(self, self.assignments[level_index])
+            assignment = assignment.to(
+                device=temporal_points.device,
+                dtype=temporal_points.dtype,
+            )
+            group_tangent = torch.einsum(
+                "gl,blh->bgh", assignment, fine_tangent
+            )
+            group_points = self.space.expmap0(group_tangent)
+            prior = self._learned_graph(
+                self.graph_logits[level_index],
+                batch,
+                group_points,
+            )
+            group_hidden = level["hgcn"](group_points, prior)
+            distance = self.space.pairwise_sqdist(group_hidden)
+            dynamic = self._distance_graph(
+                distance,
+                self.temperature_logits[level_index],
+            )
+            mix = torch.sigmoid(self.graph_mix_logits[level_index])
+            graph = (1.0 - mix) * prior + mix * dynamic
+            graph = graph / graph.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1e-8)
+            group_hidden = level["hgcn"](group_hidden, graph)
+            group_tangent = self.space.logmap0(group_hidden)
+            current_global = 0.5 * (
+                current_global + group_tangent.mean(dim=1)
+            )
+            global_message = self.global_projection(current_global)
+            global_tangent = self.space.logmap0(global_message)
+            group_message = level["projection"](group_tangent)
+            group_message = self.space.logmap0(group_message)
+            group_message = group_message + global_tangent.unsqueeze(1)
+            broadcast = torch.einsum(
+                "lg,bgh->blh",
+                assignment.transpose(0, 1),
+                group_message,
+            )
+            child_message = level["child_projection"](
+                self.space.expmap0(broadcast)
+            )
+            child_tangent = self.space.logmap0(child_message)
+            corrections.append(child_tangent)
+            level_contributions.append(child_tangent.detach().abs().mean())
+            graph_entropies.append(self._normalized_entropy(graph))
+            graph_mixes.append(mix.detach())
+
+        hierarchy_correction = torch.stack(corrections, dim=0).mean(dim=0)
+        hierarchy_mix = torch.exp(
+            0.25 * torch.tanh(self.hierarchy_mix_raw)
+        )
+        updated_tangent = fine_tangent + hierarchy_mix * hierarchy_correction
+        updated_points = self.space.expmap0(updated_tangent)
+        return updated_points, {
+            "temporal_hierarchy_mix": hierarchy_mix,
+            "temporal_hierarchy_contribution": (
+                hierarchy_correction.detach().abs().mean()
+            ),
+            "temporal_level_contribution": torch.stack(level_contributions),
+            "temporal_level_graph_entropy": torch.stack(graph_entropies),
+            "temporal_level_graph_mix": torch.stack(graph_mixes),
+            "temporal_hierarchy_fine_norm": fine_tangent.detach().norm(
+                dim=-1
+            ).mean(),
+            "temporal_hierarchy_global_norm": current_global.detach().norm(
+                dim=-1
+            ).mean(),
+        }
+
+    def _learned_graph(
+        self,
+        logits: torch.Tensor,
+        batch: int,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
+        symmetric_logits = 0.5 * (logits + logits.transpose(-1, -2))
+        graph = F.softmax(symmetric_logits, dim=-1)
+        identity = torch.eye(
+            logits.size(0),
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+        graph = 0.5 * (graph + identity)
+        graph = graph / graph.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        return graph.unsqueeze(0).expand(batch, -1, -1)
+
+    def _distance_graph(
+        self,
+        distance: torch.Tensor,
+        temperature_logit: torch.Tensor,
+    ) -> torch.Tensor:
+        temperature = F.softplus(temperature_logit) + 1e-4
+        graph = F.softmax(-distance / temperature, dim=-1)
+        identity = torch.eye(
+            distance.size(-1),
+            device=distance.device,
+            dtype=distance.dtype,
+        ).unsqueeze(0)
+        graph = 0.5 * (graph + identity)
+        return graph / graph.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
+    @staticmethod
+    def _normalized_entropy(values: torch.Tensor) -> torch.Tensor:
+        entropy = -(
+            values.clamp_min(1e-8) * values.clamp_min(1e-8).log()
+        ).sum(dim=-1)
+        maximum = torch.log(
+            torch.tensor(
+                values.size(-1),
+                device=values.device,
+                dtype=values.dtype,
+            )
+        ).clamp_min(1e-8)
+        return (entropy / maximum).mean()
+
+
 class DualGraphHyperbolicLayer(nn.Module):
     """Layer 3: parallel temporal and variable HNN/HGCN branches.
 
@@ -480,6 +711,8 @@ class DualGraphHyperbolicLayer(nn.Module):
         hgcn_residual_init: float | None = None,
         use_variable_hierarchy: bool = False,
         variable_hierarchy_groups: int = 3,
+        use_temporal_hierarchy: bool = False,
+        temporal_hierarchy_factors: tuple[int, ...] = (2, 4, 8),
     ) -> None:
         super().__init__()
         if input_length <= 0 or num_variables <= 0:
@@ -552,6 +785,16 @@ class DualGraphHyperbolicLayer(nn.Module):
             )
         else:
             self.register_module("variable_hierarchy", None)
+        if use_temporal_hierarchy:
+            self.temporal_hierarchy = HyperbolicTemporalHierarchy(
+                self.temporal_space,
+                input_length=input_length,
+                hidden_dim=hidden_dim,
+                factors=temporal_hierarchy_factors,
+                dropout=dropout,
+            )
+        else:
+            self.register_module("temporal_hierarchy", None)
 
     def forward(
         self,
@@ -633,6 +876,25 @@ class DualGraphHyperbolicLayer(nn.Module):
                 spatial_hidden
             )
 
+        if self.temporal_hierarchy is None:
+            temporal_hierarchy_diagnostics = {
+                "temporal_hierarchy_mix": temporal_graph.new_zeros(()),
+                "temporal_hierarchy_contribution": temporal_graph.new_zeros(
+                    ()
+                ),
+                "temporal_level_contribution": temporal_graph.new_zeros(0),
+                "temporal_level_graph_entropy": temporal_graph.new_zeros(0),
+                "temporal_level_graph_mix": temporal_graph.new_zeros(0),
+                "temporal_hierarchy_fine_norm": temporal_graph.new_zeros(()),
+                "temporal_hierarchy_global_norm": temporal_graph.new_zeros(
+                    ()
+                ),
+            }
+        else:
+            temporal_hidden, temporal_hierarchy_diagnostics = (
+                self.temporal_hierarchy(temporal_hidden)
+            )
+
         spatial_tangent = self.spatial_space.logmap0(spatial_hidden)
         temporal_tangent = self.temporal_space.logmap0(temporal_hidden)
         spatial_tangent = self.spatial_output_norm(spatial_tangent)
@@ -692,6 +954,7 @@ class DualGraphHyperbolicLayer(nn.Module):
                 self.variable_hierarchy is not None
             ),
             **hierarchy_diagnostics,
+            **temporal_hierarchy_diagnostics,
         }
 
     def _learned_graph(
