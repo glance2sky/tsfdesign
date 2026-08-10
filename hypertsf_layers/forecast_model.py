@@ -220,17 +220,19 @@ class LocalTrendResidual(nn.Module):
                 f"got {normalized_input.size(1)}"
             )
         recent = normalized_input[:, -self.trend_window :]
-        level = recent[:, -1:, :]
-        slope = (recent[:, -1:, :] - recent[:, :1, :]) / float(
-            self.trend_window - 1
+        level = recent[:, -1:, :].index_select(
+            -1, target_indices.to(normalized_input.device)
         )
+        slope = (
+            recent[:, -1:, :] - recent[:, :1, :]
+        ).index_select(
+            -1, target_indices.to(normalized_input.device)
+        ) / float(self.trend_window - 1)
         trend = (
             self.level_weight * level
             + self.slope_weight * slope * self.future_positions
         )
-        return torch.tanh(self.trend_scale_raw) * trend.index_select(
-            -1, target_indices
-        )
+        return torch.tanh(self.trend_scale_raw) * trend
 
 
 class AdaptivePathFusion(nn.Module):
@@ -620,6 +622,220 @@ class FrequencyResidual(nn.Module):
         }
 
 
+class TrendDifferenceResidual(nn.Module):
+    """Bounded correction from short-vs-long level differences.
+
+    This branch models an observed regime shift rather than learning another
+    unrestricted history-to-future projection. Its fixed profiles decay over
+    the forecast horizon, and all learnable amplitudes start at zero.
+    """
+
+    def __init__(
+        self,
+        input_length: int,
+        pred_length: int,
+        output_dim: int,
+        windows: tuple[int, ...] = (12, 24, 48, 96),
+        max_amplitude: float = 0.25,
+    ) -> None:
+        super().__init__()
+        if input_length < 4 or pred_length <= 0 or output_dim <= 0:
+            raise ValueError(
+                "input_length must be at least 4 and pred_length/output_dim "
+                "must be positive"
+            )
+        if not windows:
+            raise ValueError("windows must not be empty")
+        if any(window < 2 for window in windows):
+            raise ValueError("trend windows must be at least 2")
+        if len(set(windows)) != len(windows):
+            raise ValueError("trend windows must be unique")
+        if max_amplitude <= 0:
+            raise ValueError("max_amplitude must be positive")
+
+        self.input_length = input_length
+        self.pred_length = pred_length
+        self.output_dim = output_dim
+        self.windows = windows
+        self.max_amplitude = max_amplitude
+        self.amplitude_raw = nn.Parameter(
+            torch.zeros(len(windows), output_dim)
+        )
+
+        positions = torch.arange(
+            1, pred_length + 1, dtype=torch.float32
+        ).view(1, pred_length, 1)
+        window_tensor = torch.as_tensor(windows, dtype=torch.float32).view(
+            -1, 1, 1
+        )
+        profiles = torch.exp(-positions / window_tensor)
+        profiles = profiles / profiles[:, :1].clamp_min(1e-6)
+        self.register_buffer("profiles", profiles)
+
+    def forward(
+        self,
+        normalized_input: torch.Tensor,
+        target_indices: torch.Tensor,
+        return_diagnostics: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if normalized_input.ndim != 3:
+            raise ValueError(
+                "normalized_input must have shape [batch, time, variables]"
+            )
+        if normalized_input.size(1) != self.input_length:
+            raise ValueError(
+                f"Expected input length {self.input_length}, "
+                f"got {normalized_input.size(1)}"
+            )
+
+        context_mean = normalized_input.mean(dim=1)
+        differences = torch.stack(
+            [
+                normalized_input[:, -window:].mean(dim=1) - context_mean
+                for window in self.windows
+            ],
+            dim=1,
+        )
+        differences = differences.index_select(
+            -1, target_indices.to(normalized_input.device)
+        )
+        amplitudes = self.max_amplitude * torch.tanh(self.amplitude_raw)
+        correction = torch.zeros(
+            normalized_input.size(0),
+            self.pred_length,
+            self.output_dim,
+            device=normalized_input.device,
+            dtype=normalized_input.dtype,
+        )
+        for index in range(len(self.windows)):
+            correction = correction + (
+                differences[:, index].unsqueeze(1)
+                * self.profiles[index].to(normalized_input.dtype)
+                * amplitudes[index].view(1, 1, -1)
+            )
+        correction = correction / float(len(self.windows))
+        correction = correction.index_select(
+            -1, torch.arange(
+                self.output_dim,
+                device=normalized_input.device,
+            )
+        )
+        if not return_diagnostics:
+            return correction
+        return correction, {
+            "amplitude_abs_mean": amplitudes.detach().abs().mean(),
+            "branch_contribution": correction.detach().abs().mean(),
+            "difference_abs_mean": differences.detach().abs().mean(),
+        }
+
+
+class ExplicitPeriodicResidual(nn.Module):
+    """Bounded residual on explicitly specified periodic bases.
+
+    The basis period is independent of ``input_length``. This avoids tying
+    the extrapolation frequency to FFT bins that may not match the known
+    sampling period.
+    """
+
+    def __init__(
+        self,
+        input_length: int,
+        pred_length: int,
+        output_dim: int,
+        periods: tuple[int, ...] = (12, 24, 48),
+        max_amplitude: float = 0.25,
+    ) -> None:
+        super().__init__()
+        if input_length < 4 or pred_length <= 0 or output_dim <= 0:
+            raise ValueError(
+                "input_length must be at least 4 and pred_length/output_dim "
+                "must be positive"
+            )
+        if not periods:
+            raise ValueError("periods must not be empty")
+        if any(period < 2 for period in periods):
+            raise ValueError("periods must be at least 2")
+        if len(set(periods)) != len(periods):
+            raise ValueError("periods must be unique")
+        if max_amplitude <= 0:
+            raise ValueError("max_amplitude must be positive")
+
+        self.input_length = input_length
+        self.pred_length = pred_length
+        self.output_dim = output_dim
+        self.periods = periods
+        self.max_amplitude = max_amplitude
+        self.amplitude_raw = nn.Parameter(
+            torch.zeros(len(periods), output_dim, 2)
+        )
+
+        history_positions = torch.arange(
+            input_length, dtype=torch.float32
+        ).view(1, input_length)
+        future_positions = torch.arange(
+            input_length,
+            input_length + pred_length,
+            dtype=torch.float32,
+        ).view(1, pred_length)
+        period_tensor = torch.as_tensor(periods, dtype=torch.float32).view(
+            -1, 1
+        )
+        history_phase = 2.0 * torch.pi * history_positions / period_tensor
+        future_phase = 2.0 * torch.pi * future_positions / period_tensor
+        self.register_buffer("history_cos", torch.cos(history_phase))
+        self.register_buffer("history_sin", torch.sin(history_phase))
+        self.register_buffer("future_cos", torch.cos(future_phase))
+        self.register_buffer("future_sin", torch.sin(future_phase))
+
+    def forward(
+        self,
+        normalized_input: torch.Tensor,
+        target_indices: torch.Tensor,
+        return_diagnostics: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if normalized_input.ndim != 3:
+            raise ValueError(
+                "normalized_input must have shape [batch, time, variables]"
+            )
+        if normalized_input.size(1) != self.input_length:
+            raise ValueError(
+                f"Expected input length {self.input_length}, "
+                f"got {normalized_input.size(1)}"
+            )
+
+        centered = normalized_input - normalized_input.mean(
+            dim=1, keepdim=True
+        )
+        centered = centered.index_select(
+            -1, target_indices.to(normalized_input.device)
+        )
+        cosine_coeff = torch.einsum(
+            "blv,pl->bpv", centered, self.history_cos
+        ) / float(self.input_length)
+        sine_coeff = torch.einsum(
+            "blv,pl->bpv", centered, self.history_sin
+        ) / float(self.input_length)
+        coefficients = torch.stack((cosine_coeff, sine_coeff), dim=-1)
+        future_basis = torch.stack(
+            (self.future_cos, self.future_sin), dim=-1
+        )
+        amplitudes = self.max_amplitude * torch.tanh(self.amplitude_raw)
+        correction = torch.einsum(
+            "bpvc,phc,pvc->bhv",
+            coefficients,
+            future_basis,
+            amplitudes,
+        )
+        correction = correction / float(len(self.periods))
+        if not return_diagnostics:
+            return correction
+        return correction, {
+            "amplitude_abs_mean": amplitudes.detach().abs().mean(),
+            "basis_contribution": correction.detach().abs().mean(),
+            "coefficient_abs_mean": coefficients.detach().abs().mean(),
+        }
+
+
 class DirectForecastHead(nn.Module):
     """Structured direct multi-horizon head.
 
@@ -647,6 +863,12 @@ class DirectForecastHead(nn.Module):
         output_multiscale_factors: tuple[int, ...] = (2, 4, 8),
         use_frequency_residual: bool = False,
         frequency_harmonics: int = 8,
+        use_trend_difference_residual: bool = False,
+        trend_difference_windows: tuple[int, ...] = (12, 24, 48, 96),
+        trend_difference_max_amplitude: float = 0.25,
+        use_explicit_periodic_residual: bool = False,
+        explicit_periods: tuple[int, ...] = (12, 24, 48),
+        explicit_periodic_max_amplitude: float = 0.25,
     ) -> None:
         super().__init__()
         self.input_length = input_length
@@ -665,6 +887,8 @@ class DirectForecastHead(nn.Module):
         self.use_path_amplitude_calibration = use_path_amplitude_calibration
         self.use_output_multiscale_residual = use_output_multiscale_residual
         self.use_frequency_residual = use_frequency_residual
+        self.use_trend_difference_residual = use_trend_difference_residual
+        self.use_explicit_periodic_residual = use_explicit_periodic_residual
         if use_multiscale_projection:
             self.horizon_projection = MultiScaleTemporalProjection(
                 input_length=input_length,
@@ -752,6 +976,26 @@ class DirectForecastHead(nn.Module):
             )
         else:
             self.register_module("frequency_residual", None)
+        if use_trend_difference_residual:
+            self.trend_difference_residual = TrendDifferenceResidual(
+                input_length=input_length,
+                pred_length=pred_length,
+                output_dim=output_dim,
+                windows=trend_difference_windows,
+                max_amplitude=trend_difference_max_amplitude,
+            )
+        else:
+            self.register_module("trend_difference_residual", None)
+        if use_explicit_periodic_residual:
+            self.explicit_periodic_residual = ExplicitPeriodicResidual(
+                input_length=input_length,
+                pred_length=pred_length,
+                output_dim=output_dim,
+                periods=explicit_periods,
+                max_amplitude=explicit_periodic_max_amplitude,
+            )
+        else:
+            self.register_module("explicit_periodic_residual", None)
 
     def forward(
         self,
@@ -912,6 +1156,63 @@ class DirectForecastHead(nn.Module):
         output_residual = (
             output_multiscale_correction + frequency_correction
         )
+        if self.trend_difference_residual is None:
+            trend_difference_correction = torch.zeros_like(
+                normalized_prediction
+            )
+            trend_difference_amplitude_abs_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            trend_difference_contribution_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+        else:
+            (
+                trend_difference_correction,
+                trend_difference_diagnostics,
+            ) = self.trend_difference_residual(
+                normalized_input,
+                target_indices,
+                return_diagnostics=True,
+            )
+            trend_difference_amplitude_abs_mean = (
+                trend_difference_diagnostics["amplitude_abs_mean"]
+            )
+            trend_difference_contribution_mean = (
+                trend_difference_diagnostics["branch_contribution"]
+            )
+
+        if self.explicit_periodic_residual is None:
+            explicit_periodic_correction = torch.zeros_like(
+                normalized_prediction
+            )
+            explicit_periodic_amplitude_abs_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+            explicit_periodic_contribution_mean = torch.zeros(
+                (), device=direct.device, dtype=direct.dtype
+            )
+        else:
+            (
+                explicit_periodic_correction,
+                explicit_periodic_diagnostics,
+            ) = self.explicit_periodic_residual(
+                normalized_input,
+                target_indices,
+                return_diagnostics=True,
+            )
+            explicit_periodic_amplitude_abs_mean = (
+                explicit_periodic_diagnostics["amplitude_abs_mean"]
+            )
+            explicit_periodic_contribution_mean = (
+                explicit_periodic_diagnostics["basis_contribution"]
+            )
+
+        output_residual = (
+            output_residual
+            + trend_difference_correction
+            + explicit_periodic_correction
+        )
         normalized_prediction = normalized_prediction + output_residual
 
         if isinstance(self.horizon_projection, MultiScaleTemporalProjection):
@@ -957,6 +1258,18 @@ class DirectForecastHead(nn.Module):
             ),
             "frequency_gate": frequency_gate,
             "frequency_contribution_mean": frequency_contribution_mean,
+            "trend_difference_amplitude_abs_mean": (
+                trend_difference_amplitude_abs_mean
+            ),
+            "trend_difference_contribution_mean": (
+                trend_difference_contribution_mean
+            ),
+            "explicit_periodic_amplitude_abs_mean": (
+                explicit_periodic_amplitude_abs_mean
+            ),
+            "explicit_periodic_contribution_mean": (
+                explicit_periodic_contribution_mean
+            ),
             "output_residual_abs_mean": output_residual.detach().abs().mean(),
             "direct_scale_mean": direct_scale_mean,
             "residual_scale_mean": residual_scale_mean,
@@ -1016,6 +1329,12 @@ class HyperbolicTSF(nn.Module):
         output_multiscale_factors: tuple[int, ...] = (2, 4, 8),
         use_frequency_residual: bool = False,
         frequency_harmonics: int = 8,
+        use_trend_difference_residual: bool = False,
+        trend_difference_windows: tuple[int, ...] = (12, 24, 48, 96),
+        trend_difference_max_amplitude: float = 0.25,
+        use_explicit_periodic_residual: bool = False,
+        explicit_periods: tuple[int, ...] = (12, 24, 48),
+        explicit_periodic_max_amplitude: float = 0.25,
     ) -> None:
         super().__init__()
         if input_length <= 0 or pred_length <= 0:
@@ -1092,6 +1411,12 @@ class HyperbolicTSF(nn.Module):
             output_multiscale_factors=output_multiscale_factors,
             use_frequency_residual=use_frequency_residual,
             frequency_harmonics=frequency_harmonics,
+            use_trend_difference_residual=use_trend_difference_residual,
+            trend_difference_windows=trend_difference_windows,
+            trend_difference_max_amplitude=trend_difference_max_amplitude,
+            use_explicit_periodic_residual=use_explicit_periodic_residual,
+            explicit_periods=explicit_periods,
+            explicit_periodic_max_amplitude=explicit_periodic_max_amplitude,
         )
 
     def forward(

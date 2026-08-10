@@ -52,6 +52,12 @@ USE_OUTPUT_MULTISCALE_RESIDUAL = False
 USE_FREQUENCY_RESIDUAL = False
 OUTPUT_MULTISCALE_FACTORS = (2, 4, 8)
 FREQUENCY_HARMONICS = 8
+USE_TREND_DIFFERENCE_RESIDUAL = False
+TREND_DIFFERENCE_WINDOWS = (12, 24, 48, 96)
+TREND_DIFFERENCE_MAX_AMPLITUDE = 0.25
+USE_EXPLICIT_PERIODIC_RESIDUAL = False
+EXPLICIT_PERIODS = (12, 24, 48)
+EXPLICIT_PERIODIC_MAX_AMPLITUDE = 0.25
 
 # training
 BATCH_SIZE = 32
@@ -126,6 +132,10 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
             "frequency_gate",
             "frequency_contribution_mean",
             "output_residual_abs_mean",
+            "trend_difference_amplitude_abs_mean",
+            "trend_difference_contribution_mean",
+            "explicit_periodic_amplitude_abs_mean",
+            "explicit_periodic_contribution_mean",
         ]
         for k in head_keys:
             if k in head:
@@ -173,6 +183,12 @@ def train_one(
         output_multiscale_factors=OUTPUT_MULTISCALE_FACTORS,
         use_frequency_residual=USE_FREQUENCY_RESIDUAL,
         frequency_harmonics=FREQUENCY_HARMONICS,
+        use_trend_difference_residual=USE_TREND_DIFFERENCE_RESIDUAL,
+        trend_difference_windows=TREND_DIFFERENCE_WINDOWS,
+        trend_difference_max_amplitude=TREND_DIFFERENCE_MAX_AMPLITUDE,
+        use_explicit_periodic_residual=USE_EXPLICIT_PERIODIC_RESIDUAL,
+        explicit_periods=EXPLICIT_PERIODS,
+        explicit_periodic_max_amplitude=EXPLICIT_PERIODIC_MAX_AMPLITUDE,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -308,7 +324,9 @@ def main():
           f"adaptive_path_fusion={USE_ADAPTIVE_PATH_FUSION}, "
           f"path_amplitude_calibration={USE_PATH_AMPLITUDE_CALIBRATION}, "
           f"output_multiscale_residual={USE_OUTPUT_MULTISCALE_RESIDUAL}, "
-          f"frequency_residual={USE_FREQUENCY_RESIDUAL}")
+          f"frequency_residual={USE_FREQUENCY_RESIDUAL}, "
+          f"trend_difference_residual={USE_TREND_DIFFERENCE_RESIDUAL}, "
+          f"explicit_periodic_residual={USE_EXPLICIT_PERIODIC_RESIDUAL}")
     variant = "v3-default"
     if USE_MULTISCALE_PROJECTION and USE_ADAPTIVE_PATH_FUSION:
         variant = "v4-multiscale-adaptive"
@@ -322,6 +340,10 @@ def main():
         variant = f"{variant}-output-ms"
     if USE_FREQUENCY_RESIDUAL:
         variant = f"{variant}-frequency"
+    if USE_TREND_DIFFERENCE_RESIDUAL:
+        variant = f"{variant}-trend-difference"
+    if USE_EXPLICIT_PERIODIC_RESIDUAL:
+        variant = f"{variant}-explicit-periodic"
 
     results = []
 
@@ -411,6 +433,20 @@ def main():
                 "output_multiscale_factors": OUTPUT_MULTISCALE_FACTORS,
                 "use_frequency_residual": USE_FREQUENCY_RESIDUAL,
                 "frequency_harmonics": FREQUENCY_HARMONICS,
+                "use_trend_difference_residual": (
+                    USE_TREND_DIFFERENCE_RESIDUAL
+                ),
+                "trend_difference_windows": TREND_DIFFERENCE_WINDOWS,
+                "trend_difference_max_amplitude": (
+                    TREND_DIFFERENCE_MAX_AMPLITUDE
+                ),
+                "use_explicit_periodic_residual": (
+                    USE_EXPLICIT_PERIODIC_RESIDUAL
+                ),
+                "explicit_periods": EXPLICIT_PERIODS,
+                "explicit_periodic_max_amplitude": (
+                    EXPLICIT_PERIODIC_MAX_AMPLITUDE
+                ),
                 "results": results,
             },
             f,

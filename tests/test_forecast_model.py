@@ -227,3 +227,66 @@ def test_v6_output_residuals_are_zero_starting_and_differentiable() -> None:
     )
     assert frequency_grad is not None
     assert frequency_grad.abs().sum().item() > 0.0
+
+
+def test_v7_residuals_are_zero_starting_for_full_and_subset_targets() -> None:
+    model = HyperbolicTSF(
+        input_length=24,
+        pred_length=12,
+        num_variables=4,
+        output_dim=2,
+        target_indices=[2, 0],
+        tangent_dim=4,
+        hidden_dim=8,
+        manifold="poincare",
+        use_linear_residual=True,
+        use_adaptive_path_fusion=True,
+        use_path_amplitude_calibration=True,
+        use_trend_difference_residual=True,
+        trend_difference_windows=(6, 12, 24),
+        use_explicit_periodic_residual=True,
+        explicit_periods=(6, 12, 24),
+    )
+    x = torch.randn(2, 24, 4, requires_grad=True)
+    output = model(x, return_aux=True)
+    head = output["head"]
+
+    assert output["prediction"].shape == (2, 12, 2)
+    assert torch.isfinite(output["prediction"]).all()
+    assert head["trend_difference_amplitude_abs_mean"].item() == 0.0
+    assert head["explicit_periodic_amplitude_abs_mean"].item() == 0.0
+    assert head["output_residual_abs_mean"].item() == 0.0
+    assert torch.allclose(
+        head["normalized_prediction"],
+        head["direct"] + head["residual"],
+        atol=1e-6,
+    )
+
+    output["prediction"].square().mean().backward()
+    trend_grad = (
+        model.forecast_head.trend_difference_residual.amplitude_raw.grad
+    )
+    periodic_grad = (
+        model.forecast_head.explicit_periodic_residual.amplitude_raw.grad
+    )
+    assert trend_grad is not None
+    assert periodic_grad is not None
+    assert trend_grad.abs().sum().item() > 0.0
+    assert periodic_grad.abs().sum().item() > 0.0
+
+
+def test_v7_residual_modules_support_long_horizon_and_short_lookback() -> None:
+    model = HyperbolicTSF(
+        input_length=96,
+        pred_length=720,
+        num_variables=7,
+        tangent_dim=8,
+        hidden_dim=16,
+        manifold="poincare",
+        use_linear_residual=True,
+        use_trend_difference_residual=True,
+        use_explicit_periodic_residual=True,
+    )
+    output = model(torch.randn(2, 96, 7), return_aux=True)
+    assert output["prediction"].shape == (2, 720, 7)
+    assert torch.isfinite(output["prediction"]).all()
