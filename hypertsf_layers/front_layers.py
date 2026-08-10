@@ -250,6 +250,212 @@ class _HyperbolicGraphConvolution(nn.Module):
         return self.space.manifold_bias(points, self.bias)
 
 
+class HyperbolicVariableHierarchy(nn.Module):
+    """Learn a variable -> group -> global hierarchy on the manifold.
+
+    Variable nodes are softly assigned to latent groups. Group representations
+    are hyperbolic barycenter approximations in the origin tangent space,
+    updated by a group-level HGCN, and then propagated back to the leaves via
+    Mobius addition. The residual mix starts at zero, so the optional module
+    preserves the previous variable branch at initialization while keeping a
+    useful gradient path.
+    """
+
+    def __init__(
+        self,
+        space: ManifoldSpace,
+        num_variables: int,
+        hidden_dim: int,
+        num_groups: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if num_variables <= 0 or hidden_dim <= 0 or num_groups <= 0:
+            raise ValueError(
+                "num_variables, hidden_dim, and num_groups must be positive"
+            )
+        if num_groups > num_variables:
+            raise ValueError(
+                "num_groups must not exceed num_variables"
+            )
+        self.space = space
+        self.num_variables = num_variables
+        self.hidden_dim = hidden_dim
+        self.num_groups = num_groups
+
+        self.assignment_logits = nn.Parameter(
+            torch.empty(num_variables, num_groups)
+        )
+        self.assignment_projection = nn.Linear(hidden_dim, num_groups)
+        self.group_graph_logits = nn.Parameter(
+            torch.zeros(num_groups, num_groups)
+        )
+        self.group_temperature_logit = nn.Parameter(torch.zeros(()))
+        self.group_graph_mix_logit = nn.Parameter(torch.tensor(-1.0))
+        self.group_hgcn = _HyperbolicGraphConvolution(
+            space,
+            hidden_dim,
+            dropout,
+        )
+        self.global_projection = _HyperbolicNeuralProjection(
+            space,
+            hidden_dim,
+            hidden_dim,
+            dropout,
+        )
+        self.child_projection = _HyperbolicNeuralProjection(
+            space,
+            hidden_dim,
+            hidden_dim,
+            dropout,
+        )
+        self.hierarchy_mix_raw = nn.Parameter(torch.zeros(()))
+        nn.init.normal_(self.assignment_logits, mean=0.0, std=0.02)
+        nn.init.zeros_(self.assignment_projection.weight)
+        nn.init.zeros_(self.assignment_projection.bias)
+        # The child path starts at the manifold origin. This preserves the
+        # previous leaf representation while keeping gradients to the new
+        # hierarchy branch non-zero from the first update.
+        nn.init.zeros_(self.child_projection.weight)
+        nn.init.zeros_(self.child_projection.bias)
+
+    def forward(
+        self,
+        leaf_points: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if leaf_points.ndim != 3:
+            raise ValueError(
+                "leaf_points must have shape [batch, variables, hidden_dim]"
+            )
+        batch, variables, hidden_dim = leaf_points.shape
+        if (variables, hidden_dim) != (
+            self.num_variables,
+            self.hidden_dim,
+        ):
+            raise ValueError(
+                "Expected leaf shape "
+                f"[B, {self.num_variables}, {self.hidden_dim}], "
+                f"got {tuple(leaf_points.shape)}"
+            )
+
+        leaf_tangent = self.space.logmap0(leaf_points)
+        assignment_logits = (
+            self.assignment_logits.unsqueeze(0)
+            + self.assignment_projection(leaf_tangent)
+        )
+        assignment = F.softmax(assignment_logits, dim=-1)
+        assignment_mass = assignment.sum(dim=1).clamp_min(1e-6)
+        group_tangent = torch.einsum(
+            "bcg,bch->bgh", assignment, leaf_tangent
+        )
+        group_tangent = group_tangent / assignment_mass.unsqueeze(-1)
+        group_points = self.space.expmap0(group_tangent)
+
+        group_prior = self._learned_graph(
+            self.group_graph_logits,
+            batch,
+            group_points,
+        )
+        group_hidden = self.group_hgcn(group_points, group_prior)
+        group_distance = self.space.pairwise_sqdist(group_hidden)
+        group_dynamic = self._distance_graph(
+            group_distance,
+            self.group_temperature_logit,
+        )
+        group_mix = torch.sigmoid(self.group_graph_mix_logit)
+        group_graph = (
+            (1.0 - group_mix) * group_prior + group_mix * group_dynamic
+        )
+        group_graph = group_graph / group_graph.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-8)
+        group_hidden = self.group_hgcn(group_hidden, group_graph)
+        group_tangent = self.space.logmap0(group_hidden)
+
+        global_tangent = group_tangent.mean(dim=1)
+        global_message = self.global_projection(global_tangent)
+        global_tangent = self.space.logmap0(global_message)
+        group_message = group_tangent + global_tangent.unsqueeze(1)
+        leaf_group_message = torch.einsum(
+            "bcg,bgh->bch", assignment, group_message
+        )
+        child_message = self.child_projection(leaf_group_message)
+        propagated_points = self.space.mobius_add(
+            leaf_points,
+            child_message,
+        )
+        hierarchy_mix = torch.exp(
+            0.25 * torch.tanh(self.hierarchy_mix_raw)
+        )
+        propagated_tangent = self.space.logmap0(propagated_points)
+        updated_tangent = (
+            leaf_tangent
+            + hierarchy_mix * (propagated_tangent - leaf_tangent)
+        )
+        updated_points = self.space.expmap0(updated_tangent)
+
+        return updated_points, {
+            "assignment": assignment,
+            "assignment_entropy": self._normalized_entropy(assignment),
+            "group_graph": group_graph,
+            "group_graph_entropy": self._normalized_entropy(group_graph),
+            "group_graph_mix": group_mix,
+            "hierarchy_mix": hierarchy_mix,
+            "hierarchy_contribution": (
+                updated_tangent - leaf_tangent
+            ).detach().abs().mean(),
+            "leaf_tangent_norm": leaf_tangent.detach().norm(dim=-1).mean(),
+            "group_tangent_norm": group_tangent.detach().norm(dim=-1).mean(),
+            "global_tangent_norm": global_tangent.detach().norm(dim=-1).mean(),
+        }
+
+    def _learned_graph(
+        self,
+        logits: torch.Tensor,
+        batch: int,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
+        symmetric_logits = 0.5 * (logits + logits.transpose(-1, -2))
+        graph = F.softmax(symmetric_logits, dim=-1)
+        identity = torch.eye(
+            logits.size(0),
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+        graph = 0.5 * (graph + identity)
+        graph = graph / graph.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        return graph.unsqueeze(0).expand(batch, -1, -1)
+
+    def _distance_graph(
+        self,
+        distance: torch.Tensor,
+        temperature_logit: torch.Tensor,
+    ) -> torch.Tensor:
+        temperature = F.softplus(temperature_logit) + 1e-4
+        graph = F.softmax(-distance / temperature, dim=-1)
+        identity = torch.eye(
+            distance.size(-1),
+            device=distance.device,
+            dtype=distance.dtype,
+        ).unsqueeze(0)
+        graph = 0.5 * (graph + identity)
+        return graph / graph.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
+    @staticmethod
+    def _normalized_entropy(values: torch.Tensor) -> torch.Tensor:
+        entropy = -(
+            values.clamp_min(1e-8) * values.clamp_min(1e-8).log()
+        ).sum(dim=-1)
+        maximum = torch.log(
+            torch.tensor(
+                values.size(-1),
+                device=values.device,
+                dtype=values.dtype,
+            )
+        ).clamp_min(1e-8)
+        return (entropy / maximum).mean()
+
+
 class DualGraphHyperbolicLayer(nn.Module):
     """Layer 3: parallel temporal and variable HNN/HGCN branches.
 
@@ -272,6 +478,8 @@ class DualGraphHyperbolicLayer(nn.Module):
         dropout: float = 0.0,
         spatial_rank: int | None = None,
         hgcn_residual_init: float | None = None,
+        use_variable_hierarchy: bool = False,
+        variable_hierarchy_groups: int = 3,
     ) -> None:
         super().__init__()
         if input_length <= 0 or num_variables <= 0:
@@ -334,6 +542,16 @@ class DualGraphHyperbolicLayer(nn.Module):
         self.temporal_output_norm = nn.LayerNorm(hidden_dim)
         self.variable_context_projection = nn.Linear(hidden_dim, hidden_dim)
         self.fusion_gate = nn.Linear(2 * hidden_dim, hidden_dim)
+        if use_variable_hierarchy:
+            self.variable_hierarchy = HyperbolicVariableHierarchy(
+                self.spatial_space,
+                num_variables=num_variables,
+                hidden_dim=hidden_dim,
+                num_groups=variable_hierarchy_groups,
+                dropout=dropout,
+            )
+        else:
+            self.register_module("variable_hierarchy", None)
 
     def forward(
         self,
@@ -399,6 +617,22 @@ class DualGraphHyperbolicLayer(nn.Module):
         spatial_hidden = self.spatial_hgcn(spatial_hidden, spatial_graph)
         temporal_hidden = self.temporal_hgcn(temporal_hidden, temporal_graph)
 
+        if self.variable_hierarchy is None:
+            hierarchy_diagnostics = {
+                "assignment_entropy": spatial_graph.new_zeros(()),
+                "group_graph_entropy": spatial_graph.new_zeros(()),
+                "group_graph_mix": spatial_graph.new_zeros(()),
+                "hierarchy_mix": spatial_graph.new_zeros(()),
+                "hierarchy_contribution": spatial_graph.new_zeros(()),
+                "leaf_tangent_norm": spatial_graph.new_zeros(()),
+                "group_tangent_norm": spatial_graph.new_zeros(()),
+                "global_tangent_norm": spatial_graph.new_zeros(()),
+            }
+        else:
+            spatial_hidden, hierarchy_diagnostics = self.variable_hierarchy(
+                spatial_hidden
+            )
+
         spatial_tangent = self.spatial_space.logmap0(spatial_hidden)
         temporal_tangent = self.temporal_space.logmap0(temporal_hidden)
         spatial_tangent = self.spatial_output_norm(spatial_tangent)
@@ -454,6 +688,10 @@ class DualGraphHyperbolicLayer(nn.Module):
             "temporal_distance": temporal_distance,
             "spatial_curvature": self.spatial_space.curvature,
             "temporal_curvature": self.temporal_space.curvature,
+            "variable_hierarchy_assignment": (
+                self.variable_hierarchy is not None
+            ),
+            **hierarchy_diagnostics,
         }
 
     def _learned_graph(

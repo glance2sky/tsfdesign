@@ -290,3 +290,44 @@ def test_v7_residual_modules_support_long_horizon_and_short_lookback() -> None:
     output = model(torch.randn(2, 96, 7), return_aux=True)
     assert output["prediction"].shape == (2, 720, 7)
     assert torch.isfinite(output["prediction"]).all()
+
+
+def test_v8_variable_hierarchy_is_identity_but_trainable_at_initialization() -> None:
+    model = HyperbolicTSF(
+        input_length=24,
+        pred_length=12,
+        num_variables=4,
+        tangent_dim=4,
+        hidden_dim=8,
+        manifold="poincare",
+        use_linear_residual=True,
+        use_adaptive_path_fusion=True,
+        use_path_amplitude_calibration=True,
+        use_variable_hierarchy=True,
+        variable_hierarchy_groups=2,
+    )
+    x = torch.randn(2, 24, 4, requires_grad=True)
+    output = model(x, return_aux=True)
+    encoder = output["encoder"]
+
+    assert output["prediction"].shape == (2, 12, 4)
+    assert torch.isfinite(output["prediction"]).all()
+    assert encoder["hierarchy_mix"].item() == 1.0
+    assert encoder["hierarchy_contribution"].item() == 0.0
+    assert encoder["assignment"].shape == (2, 4, 2)
+    assert encoder["group_graph"].shape == (2, 2, 2)
+
+    output["prediction"].square().mean().backward()
+    hierarchy = model.graph_encoder.variable_hierarchy
+    child_grad = hierarchy.child_projection.weight.grad
+    assert child_grad is not None
+    assert child_grad.abs().sum().item() > 0.0
+
+    with torch.no_grad():
+        hierarchy.child_projection.weight.normal_(mean=0.0, std=0.01)
+    model.zero_grad()
+    output = model(x.detach(), return_aux=True)
+    output["prediction"].square().mean().backward()
+    gate_grad = hierarchy.hierarchy_mix_raw.grad
+    assert gate_grad is not None
+    assert gate_grad.abs().sum().item() > 0.0

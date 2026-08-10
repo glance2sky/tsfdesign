@@ -2,6 +2,7 @@
 
 from .front_layers import (
     DualGraphHyperbolicLayer,
+    HyperbolicVariableHierarchy,
     ManifoldEmbedding,
     RevIN,
 )
@@ -11,6 +12,7 @@ from .manifolds import ManifoldSpace
 __all__ = [
     "DirectForecastHead",
     "DualGraphHyperbolicLayer",
+    "HyperbolicVariableHierarchy",
     "HyperbolicTSF",
     "ManifoldEmbedding",
     "RevIN",

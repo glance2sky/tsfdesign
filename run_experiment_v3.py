@@ -58,6 +58,8 @@ TREND_DIFFERENCE_MAX_AMPLITUDE = 0.25
 USE_EXPLICIT_PERIODIC_RESIDUAL = False
 EXPLICIT_PERIODS = (12, 24, 48)
 EXPLICIT_PERIODIC_MAX_AMPLITUDE = 0.25
+USE_VARIABLE_HIERARCHY = False
+VARIABLE_HIERARCHY_GROUPS = 3
 
 # training
 BATCH_SIZE = 32
@@ -111,6 +113,10 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
             "spatial_tangent_norm", "temporal_tangent_norm",
             "spatial_prior_dynamic_gap", "temporal_prior_dynamic_gap",
             "spatial_curvature", "temporal_curvature",
+            "assignment_entropy", "group_graph_entropy",
+            "group_graph_mix", "hierarchy_mix",
+            "hierarchy_contribution", "leaf_tangent_norm",
+            "group_tangent_norm", "global_tangent_norm",
         ]
         for k in scalar_keys:
             if k in enc:
@@ -189,6 +195,8 @@ def train_one(
         use_explicit_periodic_residual=USE_EXPLICIT_PERIODIC_RESIDUAL,
         explicit_periods=EXPLICIT_PERIODS,
         explicit_periodic_max_amplitude=EXPLICIT_PERIODIC_MAX_AMPLITUDE,
+        use_variable_hierarchy=USE_VARIABLE_HIERARCHY,
+        variable_hierarchy_groups=VARIABLE_HIERARCHY_GROUPS,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -326,7 +334,9 @@ def main():
           f"output_multiscale_residual={USE_OUTPUT_MULTISCALE_RESIDUAL}, "
           f"frequency_residual={USE_FREQUENCY_RESIDUAL}, "
           f"trend_difference_residual={USE_TREND_DIFFERENCE_RESIDUAL}, "
-          f"explicit_periodic_residual={USE_EXPLICIT_PERIODIC_RESIDUAL}")
+          f"explicit_periodic_residual={USE_EXPLICIT_PERIODIC_RESIDUAL}, "
+          f"variable_hierarchy={USE_VARIABLE_HIERARCHY} "
+          f"(groups={VARIABLE_HIERARCHY_GROUPS})")
     variant = "v3-default"
     if USE_MULTISCALE_PROJECTION and USE_ADAPTIVE_PATH_FUSION:
         variant = "v4-multiscale-adaptive"
@@ -344,6 +354,8 @@ def main():
         variant = f"{variant}-trend-difference"
     if USE_EXPLICIT_PERIODIC_RESIDUAL:
         variant = f"{variant}-explicit-periodic"
+    if USE_VARIABLE_HIERARCHY:
+        variant = f"{variant}-variable-hierarchy"
 
     results = []
 
@@ -447,6 +459,8 @@ def main():
                 "explicit_periodic_max_amplitude": (
                     EXPLICIT_PERIODIC_MAX_AMPLITUDE
                 ),
+                "use_variable_hierarchy": USE_VARIABLE_HIERARCHY,
+                "variable_hierarchy_groups": VARIABLE_HIERARCHY_GROUPS,
                 "results": results,
             },
             f,
