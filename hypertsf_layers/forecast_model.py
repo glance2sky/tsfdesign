@@ -1341,6 +1341,10 @@ class HyperbolicTSF(nn.Module):
         temporal_hierarchy_factors: tuple[int, ...] = (2, 4, 8),
         use_recursive_temporal_hierarchy: bool = False,
         recursive_temporal_factors: tuple[int, ...] = (2, 2, 2),
+        use_patch_tokens: bool = False,
+        patch_lengths: tuple[int, ...] = (8, 16, 32),
+        patch_strides: tuple[int, ...] | None = None,
+        patch_hidden_dim: int | None = None,
     ) -> None:
         super().__init__()
         if input_length <= 0 or pred_length <= 0:
@@ -1381,11 +1385,19 @@ class HyperbolicTSF(nn.Module):
         self.embedding = ManifoldEmbedding(
             num_variables=num_variables,
             tangent_dim=tangent_dim,
-            input_length=input_length if use_time_identity else None,
+            input_length=(
+                input_length
+                if use_time_identity or use_patch_tokens
+                else None
+            ),
             manifold=manifold,
             trainable_curvature=trainable_curvature,
             init_curvature=init_curvature,
             dropout=dropout,
+            use_patch_tokens=use_patch_tokens,
+            patch_lengths=patch_lengths,
+            patch_strides=patch_strides,
+            patch_hidden_dim=patch_hidden_dim,
         )
         self.graph_encoder = DualGraphHyperbolicLayer(
             input_length=input_length,

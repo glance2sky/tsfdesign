@@ -403,3 +403,39 @@ def test_v8c_recursive_temporal_hierarchy_is_identity_and_recursive() -> None:
     down_grad = hierarchy.shared_down_projection.weight.grad
     assert down_grad is not None
     assert down_grad.abs().sum().item() > 0.0
+
+
+def test_v9a_patch_tokens_are_zero_starting_and_trainable() -> None:
+    model = HyperbolicTSF(
+        input_length=96,
+        pred_length=720,
+        num_variables=7,
+        tangent_dim=8,
+        hidden_dim=16,
+        manifold="poincare",
+        use_linear_residual=True,
+        use_adaptive_path_fusion=True,
+        use_path_amplitude_calibration=True,
+        use_patch_tokens=True,
+        patch_lengths=(8, 16, 32),
+        patch_strides=(4, 8, 16),
+        patch_hidden_dim=16,
+    )
+    x = torch.randn(2, 96, 7, requires_grad=True)
+    output = model(x, return_aux=True)
+    embedding = output["embedding"]
+
+    assert output["prediction"].shape == (2, 720, 7)
+    assert torch.isfinite(output["prediction"]).all()
+    assert embedding["patch_correction_abs_mean"].item() == 0.0
+    assert embedding["patch_local_contribution"].item() == 0.0
+    assert embedding["patch_token_contribution"].item() == 0.0
+
+    output["prediction"].square().mean().backward()
+    patch_encoder = model.embedding.patch_encoder
+    patch_grad = patch_encoder.patch_to_tangent[0].weight.grad
+    attended_grad = patch_encoder.attended_token_projection.weight.grad
+    assert patch_grad is not None
+    assert attended_grad is not None
+    assert patch_grad.abs().sum().item() > 0.0
+    assert attended_grad.abs().sum().item() > 0.0

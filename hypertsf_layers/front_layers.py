@@ -105,6 +105,10 @@ class ManifoldEmbedding(nn.Module):
         init_curvature: float = 1.0,
         dropout: float = 0.0,
         input_length: int | None = None,
+        use_patch_tokens: bool = False,
+        patch_lengths: tuple[int, ...] = (8, 16, 32),
+        patch_strides: tuple[int, ...] | None = None,
+        patch_hidden_dim: int | None = None,
     ) -> None:
         super().__init__()
         if num_variables <= 0 or tangent_dim <= 0:
@@ -131,6 +135,27 @@ class ManifoldEmbedding(nn.Module):
             )
         self.norm = nn.LayerNorm(tangent_dim)
         self.dropout = nn.Dropout(dropout)
+        if use_patch_tokens:
+            if input_length is None:
+                raise ValueError(
+                    "input_length is required when use_patch_tokens=True"
+                )
+            self.patch_encoder = HyperbolicPatchTokenEncoder(
+                self.space,
+                input_length=input_length,
+                num_variables=num_variables,
+                tangent_dim=tangent_dim,
+                hidden_dim=(
+                    tangent_dim
+                    if patch_hidden_dim is None
+                    else patch_hidden_dim
+                ),
+                patch_lengths=patch_lengths,
+                patch_strides=patch_strides,
+                dropout=dropout,
+            )
+        else:
+            self.register_module("patch_encoder", None)
         nn.init.normal_(self.variable_identity, mean=0.0, std=0.02)
         if self.time_identity is not None:
             nn.init.normal_(self.time_identity, mean=0.0, std=0.02)
@@ -151,11 +176,295 @@ class ManifoldEmbedding(nn.Module):
             tangent = tangent + self.time_identity
         tangent = self.norm(tangent)
         tangent = self.dropout(tangent)
+        if self.patch_encoder is None:
+            patch_diagnostics = {
+                "patch_scale_gate_mean": tangent.new_zeros(()),
+                "patch_scale_gate_std": tangent.new_zeros(()),
+                "patch_local_contribution": tangent.new_zeros(()),
+                "patch_token_contribution": tangent.new_zeros(()),
+                "patch_correction_abs_mean": tangent.new_zeros(()),
+                "patch_token_entropy": tangent.new_zeros(()),
+            }
+        else:
+            patch_points, patch_diagnostics = self.patch_encoder(x)
+            patch_tangent = self.space.logmap0(patch_points)
+            tangent = tangent + patch_tangent
         return {
             "tangent": tangent,
             "manifold": self.space.expmap0(tangent),
             "curvature": self.space.curvature,
+            **patch_diagnostics,
         }
+
+
+class HyperbolicPatchTokenEncoder(nn.Module):
+    """Multi-scale patch and variable-token encoder for the manifold front-end.
+
+    Patch extraction is channel-independent. Patch summaries are then treated
+    as variable tokens and mixed across variables with self-attention, in the
+    spirit of inverted time-series Transformers. The resulting local patch
+    signal and variable-token signal are projected to a tangent correction and
+    fused with the point-wise embedding using Mobius addition.
+    """
+
+    def __init__(
+        self,
+        space: ManifoldSpace,
+        input_length: int,
+        num_variables: int,
+        tangent_dim: int,
+        hidden_dim: int,
+        patch_lengths: tuple[int, ...] = (8, 16, 32),
+        patch_strides: tuple[int, ...] | None = None,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if input_length <= 0 or num_variables <= 0:
+            raise ValueError(
+                "input_length and num_variables must be positive"
+            )
+        if tangent_dim <= 0 or hidden_dim <= 0:
+            raise ValueError("tangent_dim and hidden_dim must be positive")
+        if not patch_lengths:
+            raise ValueError("patch_lengths must not be empty")
+        if any(
+            patch_length < 2 or patch_length > input_length
+            for patch_length in patch_lengths
+        ):
+            raise ValueError(
+                "patch lengths must be in [2, input_length]"
+            )
+        if len(set(patch_lengths)) != len(patch_lengths):
+            raise ValueError("patch lengths must be unique")
+        if patch_strides is None:
+            patch_strides = tuple(
+                max(1, patch_length // 2)
+                for patch_length in patch_lengths
+            )
+        if len(patch_strides) != len(patch_lengths):
+            raise ValueError(
+                "patch_strides must contain one stride per patch length"
+            )
+        if any(stride <= 0 for stride in patch_strides):
+            raise ValueError("patch strides must be positive")
+
+        self.space = space
+        self.input_length = input_length
+        self.num_variables = num_variables
+        self.tangent_dim = tangent_dim
+        self.hidden_dim = hidden_dim
+        self.patch_lengths = patch_lengths
+        self.patch_strides = patch_strides
+
+        self.patch_projections = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(patch_length, hidden_dim),
+                    nn.GELU(),
+                    nn.LayerNorm(hidden_dim),
+                )
+                for patch_length in patch_lengths
+            ]
+        )
+        num_heads = self._attention_heads(hidden_dim)
+        self.variable_attention = nn.MultiheadAttention(
+            hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.variable_norm = nn.LayerNorm(hidden_dim)
+        self.attended_token_projection = nn.Linear(hidden_dim, tangent_dim)
+        self.patch_to_tangent = nn.ModuleList(
+            [nn.Linear(hidden_dim, tangent_dim) for _ in patch_lengths]
+        )
+        self.token_to_tangent = nn.Linear(
+            hidden_dim * len(patch_lengths),
+            tangent_dim,
+        )
+        self.scale_gate_raw = nn.Parameter(
+            torch.zeros(len(patch_lengths))
+        )
+        self.token_gate_raw = nn.Parameter(torch.zeros(()))
+        for projection in self.patch_to_tangent:
+            nn.init.zeros_(projection.weight)
+            nn.init.zeros_(projection.bias)
+        nn.init.zeros_(self.token_to_tangent.weight)
+        nn.init.zeros_(self.token_to_tangent.bias)
+        nn.init.zeros_(self.attended_token_projection.weight)
+        nn.init.zeros_(self.attended_token_projection.bias)
+
+    def forward(
+        self,
+        normalized_input: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if normalized_input.ndim != 3:
+            raise ValueError(
+                "normalized_input must have shape [batch, time, variables]"
+            )
+        batch, length, variables = normalized_input.shape
+        if (length, variables) != (
+            self.input_length,
+            self.num_variables,
+        ):
+            raise ValueError(
+                "Expected input shape "
+                f"[B, {self.input_length}, {self.num_variables}], "
+                f"got {tuple(normalized_input.shape)}"
+            )
+
+        input_channel_first = normalized_input.transpose(1, 2)
+        scale_gates = torch.exp(
+            0.25 * torch.tanh(self.scale_gate_raw)
+        )
+        reconstructed = torch.zeros(
+            batch,
+            variables,
+            length,
+            self.tangent_dim,
+            device=normalized_input.device,
+            dtype=normalized_input.dtype,
+        )
+        reconstruction_weight = torch.zeros(
+            1,
+            1,
+            length,
+            1,
+            device=normalized_input.device,
+            dtype=normalized_input.dtype,
+        )
+        token_features = []
+        local_contributions = []
+
+        for scale_index, (
+            patch_length,
+            stride,
+            projection,
+            tangent_projection,
+        ) in enumerate(
+            zip(
+                self.patch_lengths,
+                self.patch_strides,
+                self.patch_projections,
+                self.patch_to_tangent,
+            )
+        ):
+            patches = input_channel_first.unfold(
+                dimension=2,
+                size=patch_length,
+                step=stride,
+            )
+            # [B, C, num_patches, patch_length] -> [B, C, num_patches, H]
+            features = projection(patches)
+            token_features.append(features.mean(dim=2))
+            patch_tangent = tangent_projection(features)
+            starts = range(
+                0,
+                self.input_length - patch_length + 1,
+                stride,
+            )
+            for patch_index, start in enumerate(starts):
+                indices = torch.arange(
+                    start,
+                    start + patch_length,
+                    device=normalized_input.device,
+                )
+                source = patch_tangent[:, :, patch_index, :]
+                source = source.unsqueeze(2).expand(
+                    -1,
+                    -1,
+                    patch_length,
+                    -1,
+                )
+                reconstructed = reconstructed.index_add(
+                    2,
+                    indices,
+                    scale_gates[scale_index] * source,
+                )
+                reconstruction_weight = reconstruction_weight.index_add(
+                    2,
+                    indices,
+                    torch.ones_like(
+                        reconstruction_weight[:, :, :patch_length, :]
+                    ),
+                )
+            local_contributions.append(
+                patch_tangent.detach().abs().mean()
+            )
+
+        token_input = torch.cat(token_features, dim=-1)
+        # Compress the multi-scale token to the shared attention width.
+        token_chunks = token_input.chunk(len(self.patch_lengths), dim=-1)
+        token_input = torch.stack(token_chunks, dim=0).mean(dim=0)
+        attended_tokens, _ = self.variable_attention(
+            token_input,
+            token_input,
+            token_input,
+            need_weights=False,
+        )
+        attended_tokens = self.variable_norm(
+            token_input + attended_tokens
+        )
+        token_correction = self.token_to_tangent(
+            torch.cat(token_features, dim=-1)
+        )
+        attended_correction = self.attended_token_projection(
+            attended_tokens
+        )
+        token_correction = token_correction + attended_correction
+        token_correction = (
+            torch.exp(0.25 * torch.tanh(self.token_gate_raw))
+            * token_correction
+        )
+        token_correction = token_correction.unsqueeze(2).expand(
+            -1,
+            -1,
+            length,
+            -1,
+        )
+        reconstructed = reconstructed / reconstruction_weight.clamp_min(1.0)
+        correction = reconstructed + token_correction
+        correction = correction / float(len(self.patch_lengths))
+        correction = correction.permute(0, 2, 1, 3)
+        patch_points = self.space.expmap0(correction)
+        return patch_points, {
+            "patch_scale_gate_mean": scale_gates.detach().mean(),
+            "patch_scale_gate_std": scale_gates.detach().std(
+                unbiased=False
+            ),
+            "patch_local_contribution": torch.stack(
+                local_contributions
+            ).mean(),
+            "patch_token_contribution": token_correction.detach().abs().mean(),
+            "patch_correction_abs_mean": correction.detach().abs().mean(),
+            "patch_token_entropy": self._normalized_entropy(
+                torch.softmax(
+                    attended_tokens.detach().norm(dim=-1),
+                    dim=-1,
+                )
+            ),
+        }
+
+    @staticmethod
+    def _attention_heads(hidden_dim: int) -> int:
+        for candidate in (8, 4, 2, 1):
+            if hidden_dim % candidate == 0:
+                return candidate
+        return 1
+
+    @staticmethod
+    def _normalized_entropy(values: torch.Tensor) -> torch.Tensor:
+        entropy = -(
+            values.clamp_min(1e-8) * values.clamp_min(1e-8).log()
+        ).sum(dim=-1)
+        maximum = torch.log(
+            torch.tensor(
+                values.size(-1),
+                device=values.device,
+                dtype=values.dtype,
+            )
+        ).clamp_min(1e-8)
+        return (entropy / maximum).mean()
 
 
 class _HyperbolicNeuralProjection(nn.Module):

@@ -64,6 +64,10 @@ USE_TEMPORAL_HIERARCHY = False
 TEMPORAL_HIERARCHY_FACTORS = (2, 4, 8)
 USE_RECURSIVE_TEMPORAL_HIERARCHY = False
 RECURSIVE_TEMPORAL_FACTORS = (2, 2, 2)
+USE_PATCH_TOKENS = False
+PATCH_LENGTHS = (8, 16, 32)
+PATCH_STRIDES = (4, 8, 16)
+PATCH_HIDDEN_DIM = 64
 
 # training
 BATCH_SIZE = 32
@@ -135,6 +139,12 @@ def evaluate(model: HyperbolicTSF, loader: DataLoader, device: str) -> dict[str,
             "recursive_temporal_hierarchy_fine_norm",
             "recursive_temporal_hierarchy_global_norm",
             "recursive_temporal_hierarchy_depth",
+            "patch_scale_gate_mean",
+            "patch_scale_gate_std",
+            "patch_local_contribution",
+            "patch_token_contribution",
+            "patch_correction_abs_mean",
+            "patch_token_entropy",
         ]
         for k in scalar_keys:
             if k in enc:
@@ -219,6 +229,10 @@ def train_one(
         temporal_hierarchy_factors=TEMPORAL_HIERARCHY_FACTORS,
         use_recursive_temporal_hierarchy=USE_RECURSIVE_TEMPORAL_HIERARCHY,
         recursive_temporal_factors=RECURSIVE_TEMPORAL_FACTORS,
+        use_patch_tokens=USE_PATCH_TOKENS,
+        patch_lengths=PATCH_LENGTHS,
+        patch_strides=PATCH_STRIDES,
+        patch_hidden_dim=PATCH_HIDDEN_DIM,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -364,6 +378,10 @@ def main():
           f"recursive_temporal_hierarchy="
           f"{USE_RECURSIVE_TEMPORAL_HIERARCHY} "
           f"(factors={RECURSIVE_TEMPORAL_FACTORS})")
+    print(
+        f"       patch_tokens={USE_PATCH_TOKENS} "
+        f"(lengths={PATCH_LENGTHS}, strides={PATCH_STRIDES})"
+    )
     variant = "v3-default"
     if USE_MULTISCALE_PROJECTION and USE_ADAPTIVE_PATH_FUSION:
         variant = "v4-multiscale-adaptive"
@@ -387,6 +405,8 @@ def main():
         variant = f"{variant}-temporal-hierarchy"
     if USE_RECURSIVE_TEMPORAL_HIERARCHY:
         variant = f"{variant}-recursive-temporal-hierarchy"
+    if USE_PATCH_TOKENS:
+        variant = f"{variant}-patch-tokens"
 
     results = []
 
@@ -498,6 +518,10 @@ def main():
                     USE_RECURSIVE_TEMPORAL_HIERARCHY
                 ),
                 "recursive_temporal_factors": RECURSIVE_TEMPORAL_FACTORS,
+                "use_patch_tokens": USE_PATCH_TOKENS,
+                "patch_lengths": PATCH_LENGTHS,
+                "patch_strides": PATCH_STRIDES,
+                "patch_hidden_dim": PATCH_HIDDEN_DIM,
                 "results": results,
             },
             f,
